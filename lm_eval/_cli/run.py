@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import textwrap
+from copy import deepcopy
 from functools import partial
 
 from lm_eval._cli.subcommand import SubCommand
@@ -427,8 +428,18 @@ class Run(SubCommand):
 
         # Process results
         if results is not None:
+            publication_samples = None
+            publication_config = getattr(cfg, "publication", None)
+            if not isinstance(publication_config, dict):
+                publication_config = cfg.metadata.get("scoreboard_publication", {})
+            publication_requested = (
+                bool(publication_config)
+                and publication_config.get("enabled", True) is True
+            )
             if cfg.log_samples:
                 samples = results.pop("samples")
+                if publication_requested:
+                    publication_samples = deepcopy(samples)
 
             dumped = json.dumps(
                 results, indent=2, default=handle_non_serializable, ensure_ascii=False
@@ -467,6 +478,26 @@ class Run(SubCommand):
                 for task_name in results["configs"]:
                     evaluation_tracker.save_results_samples(
                         task_name=task_name, samples=samples[task_name]
+                    )
+
+            if publication_samples is not None:
+                try:
+                    from lm_eval.loggers.scoreboard import (
+                        publish_lm_eval_evaluation,
+                    )
+
+                    publication_status = publish_lm_eval_evaluation(
+                        results,
+                        publication_samples,
+                        output_dir=cfg.output_path,
+                        publication=publication_config,
+                    )
+                    print(f"publication: {publication_status['publication']}")
+                except Exception as error:  # noqa: BLE001
+                    print(
+                        "publication: failed "
+                        "(evaluation complete, publication incomplete): "
+                        f"{error}"
                     )
 
             if (
