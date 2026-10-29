@@ -1,9 +1,14 @@
 import argparse
+import io
 import json
 import logging
 import os
+import subprocess
+import sys
 import textwrap
+from collections.abc import Sequence
 from functools import partial
+from pathlib import Path
 
 from lm_eval._cli.subcommand import SubCommand
 from lm_eval._cli.utils import (
@@ -13,6 +18,38 @@ from lm_eval._cli.utils import (
     request_caching_arg_to_dict,
     try_parse_json,
 )
+
+
+def _finish_reasons(value) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [reason for item in value for reason in _finish_reasons(item)]
+    reason = getattr(value, "finish_reason", None)
+    return [reason] if isinstance(reason, str) else []
+
+
+def _add_truncation_stats(results: dict, samples: dict) -> dict:
+    task_stats = {}
+    for task_name, task_samples in samples.items():
+        generated_samples = 0
+        truncated_samples = 0
+        for sample in task_samples:
+            finish_reasons = _finish_reasons(sample.get("resps", []))
+            if not finish_reasons:
+                continue
+            generated_samples += 1
+            truncated = "length" in finish_reasons
+            truncated_samples += int(truncated)
+            sample["finish_reasons"] = finish_reasons
+            sample["truncated"] = truncated
+        task_stats[task_name] = {
+            "generated_samples": generated_samples,
+            "truncated_samples": truncated_samples,
+            "truncation_rate": (
+                truncated_samples / generated_samples if generated_samples else None
+            ),
+        }
+    results["config"]["truncation"] = task_stats
+    return task_stats
 
 
 class Run(SubCommand):
@@ -58,6 +95,17 @@ class Run(SubCommand):
             type=str,
             metavar="<path>",
             help="Set initial arguments from YAML config",
+        )
+        config_group.add_argument(
+            "--only-model",
+            type=str,
+            default=None,
+            metavar="<model_name>",
+            help=textwrap.dedent("""
+                Evaluate only the named model of a config that declares
+                [[models]]. The campaign fan-out passes this to each child
+                process; single-model configs never need it.
+            """).strip(),
         )
 
         # Model and Tasks
@@ -115,6 +163,16 @@ class Run(SubCommand):
             default=None,
             metavar="<path>",
             help="Path to cache model responses (skips repeated inference)",
+        )
+        model_group.add_argument(
+            "--resume",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help=(
+                "Resume a crash-safe checkpointed run (equivalent to "
+                "checkpoint.enabled=true in [checkpoint]). See [checkpoint] in "
+                "the TOML config for dir/fresh options."
+            ),
         )
 
         # Evaluation Settings
@@ -332,6 +390,18 @@ class Run(SubCommand):
             help="Confirm understanding of unsafe code execution risks",
         )
         advanced_group.add_argument(
+            "--jobs",
+            type=int,
+            default=None,
+            metavar="<n>",
+            help=textwrap.dedent("""
+                How many models of a [[models]] campaign config to evaluate at
+                once (default: all of them, one child process per model). Each
+                model still keeps its own request budget, checkpoint, and
+                result directory.
+            """).strip(),
+        )
+        advanced_group.add_argument(
             "--metadata",
             type=json.loads,
             default=None,
@@ -344,7 +414,133 @@ class Run(SubCommand):
 
     @staticmethod
     def _execute(args: argparse.Namespace) -> None:
-        """Runs the evaluation harness with the provided arguments."""
+        """Runs the evaluation harness with the provided arguments.
+
+        A config that declares `[[models]]` describes a campaign: every declared
+        model is evaluated, one child process per model, so a single TOML covers
+        the whole model ladder. Any other config runs in this process exactly as
+        before.
+        """
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+        from lm_eval.config.evaluate_config import EvaluatorConfig
+
+        config_path = getattr(args, "config", None)
+        if config_path and not getattr(args, "only_model", None):
+            configs = EvaluatorConfig.load_configs(config_path)
+            if len(configs) > 1:
+                Run._execute_campaign(args, configs)
+                return
+
+        Run._execute_single(args)
+
+    @staticmethod
+    def _campaign_child_command(model_name: str, argv: Sequence[str]) -> list[str]:
+        """Command that re-runs this same invocation for a single campaign model."""
+        return [sys.executable, "-m", "lm_eval", *argv, "--only-model", model_name]
+
+    @staticmethod
+    def _start_campaign_model(
+        model: tuple[str, str], argv: Sequence[str]
+    ) -> tuple[str, subprocess.Popen, io.BufferedWriter]:
+        """Start one model of a campaign, logging it inside its own output_dir."""
+        model_name, output_dir = model
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        log = (Path(output_dir) / "console.log").open("ab")
+        command = Run._campaign_child_command(model_name, argv)
+        log.write(
+            f"# campaign model {model_name}\n# command: {' '.join(command)}\n".encode()
+        )
+        log.flush()
+        process = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+            command,
+            cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        return model_name, process, log
+
+    @staticmethod
+    def _execute_campaign(
+        args: argparse.Namespace,
+        configs: list[dict],
+        argv: Sequence[str] | None = None,
+    ) -> None:
+        """Evaluate every model a campaign config declares.
+
+        Each model keeps its own request budget, checkpoint, result directory,
+        and publication settings; the child re-reads the very same campaign file
+        with `--only-model`, so its resolved config -- and therefore its
+        checkpoint fingerprint -- is exactly what the equivalent per-model
+        config file produced. Models default to running all at once, which is
+        what keeps a served endpoint busy across the whole ladder; `--jobs` caps
+        the fan-out.
+        """
+        eval_logger = logging.getLogger(__name__)
+        models = [
+            (config_data["metadata"]["model_name"], config_data["output_path"])
+            for config_data in configs
+        ]
+        jobs = max(1, len(models) if not args.jobs else min(args.jobs, len(models)))
+        argv = list(sys.argv[1:] if argv is None else argv)
+        eval_logger.info(
+            "Campaign config declares %d models, running %d at a time: %s",
+            len(models),
+            jobs,
+            ", ".join(model_name for model_name, _ in models),
+        )
+
+        failures: list[tuple[str, int]] = []
+        running: list[tuple[str, subprocess.Popen, io.BufferedWriter]] = []
+        pending = list(models)
+        try:
+            while pending or running:
+                while pending and len(running) < jobs:
+                    running.append(Run._start_campaign_model(pending.pop(0), argv))
+                # Peek instead of popping so an interrupt during the wait still
+                # finds every live child -- including this one -- to stop.
+                model_name, process, log = running[0]
+                returncode = process.wait()
+                running.pop(0)
+                log.close()
+                if returncode == 0:
+                    eval_logger.info("Campaign model %s finished", model_name)
+                else:
+                    failures.append((model_name, returncode))
+                    eval_logger.error(
+                        "Campaign model %s exited with status %d",
+                        model_name,
+                        returncode,
+                    )
+        except BaseException:
+            for _, process, log in running:
+                process.terminate()
+            for _, process, log in running:
+                process.wait()
+                log.close()
+            raise
+
+        failed = {model_name for model_name, _ in failures}
+        print(
+            "\n".join(
+                [
+                    f"campaign summary: {len(models) - len(failures)}/{len(models)} "
+                    "models completed",
+                    *(
+                        f"  {'ok  ' if model_name not in failed else 'fail'}  "
+                        f"{model_name}  {Path(output_dir) / 'console.log'}"
+                        for model_name, output_dir in models
+                    ),
+                ]
+            )
+        )
+        if failures:
+            raise SystemExit(1)
+
+    @staticmethod
+    def _execute_single(args: argparse.Namespace) -> None:
+        """Runs one resolved model config through the evaluation harness."""
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
         from lm_eval.config.evaluate_config import EvaluatorConfig
@@ -372,9 +568,95 @@ class Run(SubCommand):
             cfg.hf_hub_log_args["token"] = os.environ.get("HF_TOKEN")
 
         evaluation_tracker = EvaluationTracker(**cfg.hf_hub_log_args)
+        scoreboard_callback = None
+        publication = getattr(cfg, "publication", {})
+        if isinstance(publication, dict) and publication.get("enabled", False):
+            from lm_eval.loggers.scoreboard import (
+                PublicationConfig,
+                ScoreboardTaskCallback,
+            )
+
+            publication_config = PublicationConfig.from_mapping(publication)
+            scoreboard_callback = ScoreboardTaskCallback(
+                config=publication_config,
+            )
+
+        checkpoint_store = None
+        checkpoint_cfg = dict(cfg.checkpoint or {})
+        if cfg.resume:
+            checkpoint_cfg["enabled"] = True
+        if checkpoint_cfg.get("enabled", False):
+            from dataclasses import asdict as _asdict
+
+            from lm_eval.api.checkpoint import (
+                CheckpointStore,
+                compute_config_fingerprint,
+                without_operational_args,
+            )
+
+            if cfg.use_cache:
+                raise ValueError(
+                    "checkpoint (or --resume) and --use_cache cannot be combined: "
+                    "CachingLM's cache-check wrapper does not forward checkpoint "
+                    "item identity."
+                )
+
+            checkpoint_dir = checkpoint_cfg.get("dir")
+            if not checkpoint_dir:
+                if not cfg.output_path:
+                    raise ValueError(
+                        "checkpoint.enabled (or --resume) requires output_path "
+                        "or checkpoint.dir to be set"
+                    )
+                checkpoint_dir = os.path.join(cfg.output_path, "checkpoints")
+            db_path = os.path.join(checkpoint_dir, "run.sqlite3")
+
+            fingerprint_payload = _asdict(cfg)
+            if cfg.model in {
+                "rwkv7-lightning-cuda",
+                "rwkv7-remote",
+                "rwkv7-remote-chat",
+            }:
+                from lm_eval.api.checkpoint import EVALUATION_PROTOCOL_VERSION
+                fingerprint_payload["evaluation_protocol"] = EVALUATION_PROTOCOL_VERSION
+            # HTTP request concurrency and the client-side timeout/retry policy
+            # are scheduling/resource knobs. They do not change prompts,
+            # sampling, or model identity, so changing them must remain
+            # compatible with an existing checkpoint run. `num_concurrent` is
+            # derived from the config's declared `max_num_seqs` (the endpoint's
+            # own inference capacity), so it is excluded here as well -- with the
+            # same list `compute_task_fingerprint` uses, so the run id and the
+            # per-item fingerprints can never disagree about them.
+            for key in ("model_args", "metadata"):
+                value = fingerprint_payload.get(key)
+                if isinstance(value, dict):
+                    fingerprint_payload[key] = without_operational_args(value)
+            for key in (
+                "config",
+                "checkpoint",
+                "resume",
+                "show_config",
+                "verbosity",
+                "write_out",
+                "check_integrity",
+                # Publication only affects what happens to already-computed
+                # results afterward, not what gets requested/computed, so it
+                # must not change the run identity -- otherwise adding a
+                # [publication] section to republish an already-completed
+                # run's results would be treated as a brand new run.
+                "publication",
+            ):
+                fingerprint_payload.pop(key, None)
+            config_fingerprint = compute_config_fingerprint(fingerprint_payload)
+
+            checkpoint_store = CheckpointStore(
+                db_path=db_path,
+                config_fingerprint=config_fingerprint,
+                fresh=bool(checkpoint_cfg.get("fresh", False)),
+            )
 
         # Create task manager (metadata already set up in config validation)
-        task_manager = cfg.process_tasks(cfg.metadata)
+        task_manager, benchmark_map = cfg.process_tasks(cfg.metadata)
 
         # Validation warnings (keep these in CLI as they're logging-specific)
         if "push_samples_to_hub" in cfg.hf_hub_log_args and not cfg.log_samples:
@@ -423,12 +705,19 @@ class Run(SubCommand):
             fewshot_random_seed=cfg.seed[3] if cfg.seed else None,
             confirm_run_unsafe_code=cfg.confirm_run_unsafe_code,
             metadata=cfg.metadata,
+            task_callback=scoreboard_callback,
+            checkpoint_store=checkpoint_store,
+            benchmark_map=benchmark_map,
         )
+
+        if checkpoint_store is not None:
+            checkpoint_store.close()
 
         # Process results
         if results is not None:
             if cfg.log_samples:
                 samples = results.pop("samples")
+                _add_truncation_stats(results, samples)
 
             dumped = json.dumps(
                 results, indent=2, default=handle_non_serializable, ensure_ascii=False
@@ -465,9 +754,10 @@ class Run(SubCommand):
 
             if cfg.log_samples:
                 for task_name in results["configs"]:
-                    evaluation_tracker.save_results_samples(
-                        task_name=task_name, samples=samples[task_name]
-                    )
+                    if task_name not in evaluation_tracker.saved_sample_tasks:
+                        evaluation_tracker.save_results_samples(
+                            task_name=task_name, samples=samples[task_name]
+                        )
 
             if (
                 evaluation_tracker.push_results_to_hub

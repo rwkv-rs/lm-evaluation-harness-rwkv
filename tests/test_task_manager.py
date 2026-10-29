@@ -510,6 +510,29 @@ class TestTaskManagerIntegration:
         assert "arc_easy" in matches
         assert "arc_challenge" in matches
 
+    def test_rwkv_public_benchmark_names_resolve_natively(self, shared_task_manager):
+        """The public names in configs/eval/lm_eval.toml resolve directly
+        as native task/group/tag names, with no adapter indirection."""
+        public_names = [
+            "race",
+            "drop",
+            "xquad",
+            "babilong",
+            "infinitebench",
+            "ruler",
+            "wmdp",
+            "cruxeval",
+            "inverse_scaling_prize",
+            "model_written_evals",
+            "humaneval_infilling",
+            "mutual",
+            "mc_taco",
+            "discrim_eval",
+            "winogender",
+        ]
+        for name in public_names:
+            assert name in shared_task_manager.all_tasks, name
+
     def test_name_is_registered(self, shared_task_manager):
         """_name_is_registered checks if name exists"""
         assert "arc_easy" in shared_task_manager._index

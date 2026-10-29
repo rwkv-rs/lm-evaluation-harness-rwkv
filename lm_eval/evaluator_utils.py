@@ -32,6 +32,9 @@ class ResultAcc(TypedDict):
     task: Task
     raw_metrics: dict[tuple[str, str], list[Any]]
     logged_samples: list[Any]
+    # Number of docs actually evaluated (not a metric's value count -- see
+    # `_compute_task_aggregations`).
+    n_docs: int
 
 
 def print_writeout(task: Task) -> None:
@@ -174,6 +177,7 @@ def _compute_task_aggregations(
     task: Task,
     raw_metrics: dict[tuple[str, str], list],
     bootstrap_iters: int | None = 100000,
+    n_docs: int = 0,
 ) -> tuple[dict[str, Any], int]:
     """
     Compute aggregated metrics from raw per-sample metrics.
@@ -182,12 +186,23 @@ def _compute_task_aggregations(
         task: Task object (for aggregation functions)
         raw_metrics: {(metric_name, filter_key): [values]}
         bootstrap_iters: Number of bootstrap iterations for stderr
+        n_docs: Number of docs actually evaluated for this task -- the single
+            source for `sample_len`/`n_samples`. It is deliberately *not*
+            derived from any metric's value list: an avg@k metric only
+            carries values for the docs that reported it, so taking a
+            metric's length as the sample count silently under-reports the
+            benchmark size (and skews any aggregation weighted by it).
 
     Returns:
         (agg_metrics dict, sample_count)
     """
     agg_metrics: dict[str, Any] = {}
-    sample_len = 0
+    # Callers that build `raw_metrics` themselves (e.g. unit tests driving one
+    # aggregation step) may not know the doc count; fall back to the longest
+    # metric list, which is the closest available proxy for it.
+    sample_len = n_docs or max(
+        (len(items) for items in raw_metrics.values()), default=0
+    )
 
     for (metric, filter_key), items in raw_metrics.items():
         try:
@@ -201,7 +216,6 @@ def _compute_task_aggregations(
 
         metric_key = f"{metric},{filter_key}"
         agg_metrics[metric_key] = agg_fn(items)
-        sample_len = len(items)  # TODO: reflects only the last metric's count
 
         if isinstance(bootstrap_iters, int) and bootstrap_iters > 0:
             stderr_fn = stderr_for_metric(
@@ -216,7 +230,43 @@ def _compute_task_aggregations(
         else:
             agg_metrics[f"{metric}_stderr,{filter_key}"] = "N/A"
 
+    # Completion-level counters, mirroring lighteval-rwkv's results JSON
+    # (`n_samples`/`n_completions`/`n_truncated`/`truncation_rate`) so the
+    # scoreboard producer can read them instead of re-deriving sample counts
+    # from metric lists: `avg_k = n_completions / n_samples` there
+    # (`src/rwkv_eval/upload.py`), and truncation is per completion rather
+    # than per doc. A task that never went through the avg@k patch (k=1) has
+    # no per-rollout stats: its completions are its docs, and truncation is
+    # left to the producer's sample-evidence derivation, which is exact for
+    # a single rollout per doc.
+    n_completions, n_truncated = _rollout_totals(task, sample_len)
+    agg_metrics["n_samples"] = sample_len
+    agg_metrics["n_completions"] = n_completions
+    if n_truncated is not None:
+        agg_metrics["n_truncated"] = n_truncated
+        agg_metrics["truncation_rate"] = (
+            n_truncated / n_completions if n_completions else 0.0
+        )
+
     return agg_metrics, sample_len
+
+
+def _rollout_totals(task: Task, n_docs: int) -> tuple[int, int | None]:
+    """``(n_completions, n_truncated)`` for one task.
+
+    ``n_truncated`` is ``None`` when at least one doc could not report
+    per-rollout truncation (e.g. an older response object without the
+    per-rollout record) -- callers must then omit the truncation fields
+    rather than publish a rate computed from a partial numerator.
+    """
+    stats = getattr(task, "_rollout_stats", None) or {}
+    if not stats:
+        return n_docs, None
+    completions = sum(entry["completions"] for entry in stats.values())
+    truncated = [entry["truncated"] for entry in stats.values()]
+    if any(value is None for value in truncated):
+        return completions, None
+    return completions, sum(truncated)
 
 
 def _collect_results(
@@ -229,7 +279,7 @@ def _collect_results(
 
     Args:
         eval_results_acc: Accumulated metrics from evaluation.
-            Format: {task_name: {"task": Task, "raw_metrics": defaultdict, "logged_samples": []}}
+            Format: {task_name: {"task": Task, "raw_metrics": defaultdict, "logged_samples": [], "n_docs": int}}
         groups: Dict of group name -> Group objects
         bootstrap_iters: Number of bootstrap iterations for stderr calculation
 
@@ -245,7 +295,7 @@ def _collect_results(
         # Compute aggregated metrics
         # TODO: note: currently assume all metrics are scalar-valued
         agg_metrics, sample_len = _compute_task_aggregations(
-            task, acc["raw_metrics"], bootstrap_iters
+            task, acc["raw_metrics"], bootstrap_iters, acc.get("n_docs", 0)
         )
 
         # Get task config
@@ -356,7 +406,7 @@ def _process_results(
 
     Args:
         eval_results_acc: Accumulated metrics from evaluation.
-            Format: {task_name: {"task": Task, "raw_metrics": defaultdict, "logged_samples": []}}
+            Format: {task_name: {"task": Task, "raw_metrics": defaultdict, "logged_samples": [], "n_docs": int}}
         groups: Dict of group name -> Group
         bootstrap_iters: Number of bootstrap iterations for stderr calculation
 
@@ -375,7 +425,7 @@ def _process_results(
         loaded = task_manager.load(['arc', 'hellaswag'])
 
         # Run evaluation (populates raw_metrics and logged_samples)
-        eval_results_acc = {name: {"task": t, "raw_metrics": defaultdict(list), "logged_samples": []}
+        eval_results_acc = {name: {"task": t, "raw_metrics": defaultdict(list), "logged_samples": [], "n_docs": 0}
                            for name, t in loaded['tasks'].items()}
 
         results = _process_results(eval_results_acc, loaded['groups'])

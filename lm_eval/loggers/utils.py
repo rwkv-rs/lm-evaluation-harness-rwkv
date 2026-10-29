@@ -12,6 +12,13 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _safe_cwd() -> Path:
+    try:
+        return Path(os.getcwd())
+    except OSError:
+        return Path(__file__).resolve().parents[2]
+
+
 def remove_none_pattern(input_string: str) -> tuple[str, bool]:
     """Remove the ',none' substring from the input_string if it exists at the end.
 
@@ -88,9 +95,9 @@ def get_git_commit_hash():
     try:
         git_hash = subprocess.check_output(["git", "describe", "--always"]).strip()  # noqa: S607
         git_hash = git_hash.decode()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         # FileNotFoundError occurs when git not installed on system
-        git_hash = get_commit_from_path(os.getcwd())  # git hash of repo if exists
+        git_hash = get_commit_from_path(_safe_cwd())  # git hash of repo if exists
     return git_hash
 
 
@@ -116,9 +123,7 @@ def add_env_info(storage: dict[str, Any]):
         from transformers import __version__ as transformers_version
     else:
         transformers_version = "N/A"
-    upper_dir_commit = get_commit_from_path(
-        Path(os.getcwd(), "..")
-    )  # git hash of upper repo if exists
+    upper_dir_commit = get_commit_from_path(_safe_cwd().parent)  # git hash of upper repo if exists
     added_info = {
         "pretty_env_info": pretty_env_info,
         "transformers_version": transformers_version,

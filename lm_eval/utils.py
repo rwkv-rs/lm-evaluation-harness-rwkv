@@ -663,10 +663,17 @@ def hash_dict_images(data_dict):
               bytes and PIL.Image.Image objects replaced by their hashes.
     """
 
+    # Ensure the top-level is a dict
+    if not isinstance(data_dict, dict):
+        raise TypeError("Input must be a dictionary")
+
+    try:
+        from PIL import Image
+    except (ImportError, OSError):
+        return data_dict
+
     def _process_value(value):
         # Bytes -> hash
-        from PIL import Image
-
         if isinstance(value, (bytes, bytearray)):
             return convert_bytes_to_hash(value)
         # PIL Image -> hash
@@ -683,15 +690,7 @@ def hash_dict_images(data_dict):
         # Other types remain unchanged
         return value
 
-    # Ensure the top-level is a dict
-    if not isinstance(data_dict, dict):
-        raise TypeError("Input must be a dictionary")
-
-    return (
-        {key: _process_value(val) for key, val in data_dict.items()}
-        if importlib.util.find_spec("PIL")
-        else data_dict
-    )
+    return {key: _process_value(val) for key, val in data_dict.items()}
 
 
 class RemoteTokenizer:

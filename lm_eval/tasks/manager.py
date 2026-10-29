@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 from collections import defaultdict
 from itertools import chain
@@ -82,6 +83,8 @@ class TaskManager:
         if include_defaults:
             all_paths.append(Path(__file__).parent)
         if include_path:
+            if isinstance(include_path, str):
+                include_path = include_path.split(os.pathsep)
             all_paths += [
                 Path(p)
                 for p in (

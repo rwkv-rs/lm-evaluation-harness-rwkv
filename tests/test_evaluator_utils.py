@@ -238,6 +238,62 @@ class TestComputeTaskAggregations:
         assert "bleu,none" in metrics
 
 
+class TestRecordedRunCounts:
+    """The results carry the same run statistics lighteval-rwkv records.
+
+    Publication derives `num_samples`/`avg_k` from them (`avg_k =
+    n_completions / n_samples`), so a metric's value-list length -- which is
+    shorter than the doc count whenever an avg@k average only covers part of
+    the benchmark -- must never stand in for the sample count.
+    """
+
+    def _task(self, stats=None):
+        task = MockEvalTask("t", agg={"acc": mean})
+        if stats is not None:
+            task._rollout_stats = stats
+        return task
+
+    def test_sample_count_is_the_doc_count_not_a_metric_length(self):
+        task = self._task()
+        raw = {
+            ("acc", "none"): [1.0] * 720,
+            # The avg@k average only covers the docs that reported it.
+            ("acc_avg@8", "none"): [1.0] * 240,
+        }
+        metrics, sample_len = _compute_task_aggregations(
+            task, raw, bootstrap_iters=0, n_docs=720
+        )
+        assert sample_len == 720
+        assert metrics["n_samples"] == 720
+        assert metrics["n_completions"] == 720
+
+    def test_rollout_counts_come_from_the_patchs_per_doc_records(self):
+        task = self._task(
+            stats={
+                0: {"completions": 8, "truncated": 2},
+                1: {"completions": 8, "truncated": 0},
+            }
+        )
+        raw = {("acc", "none"): [1.0, 0.0]}
+        metrics, _ = _compute_task_aggregations(task, raw, bootstrap_iters=0, n_docs=2)
+        assert metrics["n_completions"] == 16
+        assert metrics["n_truncated"] == 2
+        assert metrics["truncation_rate"] == pytest.approx(2 / 16)
+
+    def test_unknown_truncation_is_omitted_rather_than_reported_as_zero(self):
+        task = self._task(
+            stats={
+                0: {"completions": 4, "truncated": None},
+                1: {"completions": 4, "truncated": 1},
+            }
+        )
+        raw = {("acc", "none"): [1.0, 0.0]}
+        metrics, _ = _compute_task_aggregations(task, raw, bootstrap_iters=0, n_docs=2)
+        assert metrics["n_completions"] == 8
+        assert "n_truncated" not in metrics
+        assert "truncation_rate" not in metrics
+
+
 # ---------------------------------------------------------------------------
 # TestCollectResults
 # ---------------------------------------------------------------------------
