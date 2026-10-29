@@ -208,10 +208,20 @@ class RWKV7HTTP(LocalCompletionsAPI):
         "bot": "✿",
         "function_calling": "\n### User",
     }
-    GENERATION_PROMPTS = {"open_think", "fake_think"}
+    GENERATION_PROMPTS = {"no_think", "open_think", "fake_think"}
     PROFILE_FILES = {
         "open_think": "generation_config.json",
         "fake_think": "fake_think_generation_config.json",
+    }
+    NO_THINK_PROFILE = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "penalty_decay": 1.0,
+        "do_sample": False,
+        "stop_strings": ["✿", "\nUser:", "\n### User"],
     }
 
     def __init__(
@@ -253,7 +263,9 @@ class RWKV7HTTP(LocalCompletionsAPI):
         if rwkv_prompt_template not in self.PROMPT_TEMPLATES:
             raise ValueError("rwkv_prompt_template must be assistant, bot, or function_calling.")
         if rwkv_generation_prompt not in self.GENERATION_PROMPTS:
-            raise ValueError("rwkv_generation_prompt must be open_think or fake_think.")
+            raise ValueError(
+                "rwkv_generation_prompt must be no_think, open_think, or fake_think."
+            )
 
         self.rwkv_prompt_template = rwkv_prompt_template
         self.rwkv_generation_prompt = rwkv_generation_prompt
@@ -281,12 +293,17 @@ class RWKV7HTTP(LocalCompletionsAPI):
 
         from transformers import GenerationConfig
 
-        profile = GenerationConfig.from_pretrained(
-            tokenizer,
-            config_file_name=self.PROFILE_FILES[rwkv_generation_prompt],
-            local_files_only=os.path.isdir(tokenizer),
-        )
-        self._generation_profile = profile.to_dict()
+        if rwkv_generation_prompt == "no_think":
+            # Older official tokenizer releases do not ship a no_think profile;
+            # NoCoT is the deterministic RWKV preset and needs no file lookup.
+            self._generation_profile = dict(self.NO_THINK_PROFILE)
+        else:
+            profile = GenerationConfig.from_pretrained(
+                tokenizer,
+                config_file_name=self.PROFILE_FILES[rwkv_generation_prompt],
+                local_files_only=os.path.isdir(tokenizer),
+            )
+            self._generation_profile = profile.to_dict()
         self._chat_template_sha256 = hashlib.sha256(
             self._chat_template_source.encode("utf-8")
         ).hexdigest()
@@ -324,14 +341,26 @@ class RWKV7HTTP(LocalCompletionsAPI):
     ) -> str:
         from lm_eval.utils import env
 
+        template_generation_prompt = self.rwkv_generation_prompt
+        if template_generation_prompt == "no_think":
+            # Official tokenizer templates predating NoCoT reject ``no_think``.
+            # Render their open-think turn cue, then remove only that cue so the
+            # completion starts immediately after the assistant label.
+            template_generation_prompt = "open_think"
         rendered = env.from_string(self._chat_template_source).render(
             messages=chat_history,
             add_generation_prompt=add_generation_prompt,
             rwkv_prompt_template=self.rwkv_prompt_template,
-            rwkv_generation_prompt=self.rwkv_generation_prompt,
+            rwkv_generation_prompt=template_generation_prompt,
             tools=kwargs.pop("tools", None),
             **kwargs,
         )
+        if (
+            add_generation_prompt
+            and self.rwkv_generation_prompt == "no_think"
+            and rendered.endswith("<think")
+        ):
+            rendered = rendered.removesuffix("<think")
         if (
             add_generation_prompt
             and self.rwkv_generation_prompt == "fake_think"

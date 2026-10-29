@@ -142,6 +142,25 @@ def test_rwkv7_remote_chat_create_payload_sends_chat_template_kwargs(monkeypatch
 
 
 
+def test_rwkv7_remote_chat_no_think_sends_template_and_deterministic_profile(monkeypatch):
+    monkeypatch.setenv("RWKV_API_KEY", "test-key")
+    model = _build(rwkv_prompt_template="assistant", rwkv_generation_prompt="no_think")
+
+    payload = model._create_payload(
+        [{"role": "user", "content": "hi"}],
+        generate=True,
+        gen_kwargs={"until": [], "max_gen_toks": 32},
+    )
+
+    assert payload["chat_template_kwargs"] == {
+        "rwkv_prompt_template": "assistant",
+        "rwkv_generation_prompt": "no_think",
+    }
+    generation_config = json.loads(payload["generation_config"])
+    assert generation_config["temperature"] == 0.0
+    assert generation_config["do_sample"] is False
+
+
 def test_rwkv7_remote_chat_create_payload_passthrough_for_non_generate(monkeypatch):
     monkeypatch.setenv("RWKV_API_KEY", "test-key")
     model = _build()

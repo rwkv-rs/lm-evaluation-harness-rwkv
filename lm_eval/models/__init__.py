@@ -42,6 +42,7 @@ MODEL_MAPPING = {
     "local-chat-completions": "lm_eval.models.openai_completions:LocalChatCompletion",
     "local-completions": "lm_eval.models.openai_completions:LocalCompletionsAPI",
     "rwkv7-http": "lm_eval.models.openai_completions:RWKV7HTTP",
+    "rwkv7-lightning-cuda": "lm_eval.models.rwkv_lightning:RWKV7LightningCUDA",
     "rwkv7-remote": "lm_eval.models.rwkv_remote:RWKV7Remote",
     "rwkv7-remote-chat": "lm_eval.models.rwkv_remote_chat:RWKV7RemoteChat",
     "mamba_ssm": "lm_eval.models.mamba_lm:MambaLMWrapper",

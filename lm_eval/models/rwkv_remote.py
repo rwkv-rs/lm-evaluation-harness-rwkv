@@ -6,6 +6,8 @@ from collections import Counter, defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from jinja2 import TemplateError
+
 from lm_eval.api.checkpoint import ItemKey, serialize_response
 from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
@@ -51,12 +53,17 @@ class RWKV7Remote(LocalCompletionsAPI):
     tuples are scoring encodings, not real log probabilities. The official
     local tokenizer renders the chat template and budgets the complete prompt.
     Sampling parameters are sent explicitly as vLLM request fields.
+
+    ``rwkv_generation_prompt`` (``no_think``/``fake_think``/``open_think``) always
+    selects one of three fixed sampling presets (``SAMPLING_PARAMETERS``), whether
+    or not a tokenizer is configured. These are not read from a per-checkpoint
+    ``generation_config.json`` and cannot be overridden via ``gen_kwargs``.
     """
 
     # Signals to the evaluator's per-task override loop (lm_eval/evaluator.py)
     # that this backend implements avg@k: multiple_choice tasks are scored by
     # sampling `Instance.repeats` independent generations (through the real
-    # open_think/fake_think sampling profile) and averaging correctness over
+    # no_think/open_think/fake_think sampling profile) and averaging correctness over
     # them, rather than the echo/logprob loglikelihood path used by default.
     SUPPORTS_AVG_AT_K = True
     INDEPENDENT_ROLLOUTS = True
@@ -70,13 +77,23 @@ class RWKV7Remote(LocalCompletionsAPI):
         "bot": "✿",
         "function_calling": "\n### User",
     }
-    GENERATION_PROMPTS = {"open_think", "fake_think"}
-    # Fixed sampling presets for the two RWKV7 generation modes, mirroring the RWKV
+    GENERATION_PROMPTS = {"no_think", "open_think", "fake_think"}
+    # Fixed sampling presets for the three RWKV7 generation modes, mirroring the RWKV
     # weight family's own defaults (and lighteval-rwkv's SAMPLING_PARAMETERS). These
     # are shipped in source rather than read from a per-checkpoint generation_config.json
     # so the reported sampling_config is a stable, auditable constant independent of
     # which tokenizer directory (if any) a given run happens to point at.
     SAMPLING_PARAMETERS = {
+        "no_think": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "penalty_decay": 1.0,
+            "do_sample": False,
+            "stop_strings": ["✿", "\nUser:", "\n### User"],
+        },
         "open_think": {
             "temperature": 0.96,
             "top_p": 0.76,
@@ -119,11 +136,15 @@ class RWKV7Remote(LocalCompletionsAPI):
         if rwkv_prompt_template not in self.PROMPT_TEMPLATES:
             raise ValueError("rwkv_prompt_template must be assistant, bot, or function_calling.")
         if rwkv_generation_prompt not in self.GENERATION_PROMPTS:
-            raise ValueError("rwkv_generation_prompt must be open_think or fake_think.")
+            raise ValueError(
+                "rwkv_generation_prompt must be no_think, open_think, or fake_think."
+            )
 
         self.rwkv_prompt_template = rwkv_prompt_template
         self.rwkv_generation_prompt = rwkv_generation_prompt
-        kwargs.setdefault("max_gen_toks", MAX_NEW_TOKENS)
+        kwargs.setdefault(
+            "max_gen_toks", 256 if rwkv_generation_prompt == "no_think" else MAX_NEW_TOKENS
+        )
         super().__init__(
             base_url=base_url,
             tokenizer=tokenizer,
@@ -474,14 +495,31 @@ class RWKV7Remote(LocalCompletionsAPI):
 
         from lm_eval.utils import env
 
-        rendered = env.from_string(self._chat_template_source).render(
+        template_generation_prompt = self.rwkv_generation_prompt
+        if template_generation_prompt == "no_think":
+            # Older official tokenizer templates reject ``no_think``. Render an
+            # open-think cue and remove it, preserving the assistant turn prefix.
+            template_generation_prompt = "open_think"
+        template = env.from_string(self._chat_template_source)
+
+        def raise_exception(message: str) -> None:
+            raise TemplateError(message)
+
+        rendered = template.render(
             messages=chat_history,
             add_generation_prompt=add_generation_prompt,
             rwkv_prompt_template=self.rwkv_prompt_template,
-            rwkv_generation_prompt=self.rwkv_generation_prompt,
+            rwkv_generation_prompt=template_generation_prompt,
             tools=kwargs.pop("tools", None),
+            raise_exception=raise_exception,
             **kwargs,
         )
+        if (
+            add_generation_prompt
+            and self.rwkv_generation_prompt == "no_think"
+            and rendered.endswith("<think")
+        ):
+            rendered = rendered.removesuffix("<think")
         if (
             add_generation_prompt
             and self.rwkv_generation_prompt == "fake_think"

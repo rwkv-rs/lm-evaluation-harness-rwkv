@@ -198,6 +198,36 @@ def test_rwkv7_http_apply_chat_template_appends_fake_think_close(monkeypatch):
     )
 
 
+def test_rwkv7_http_no_think_omits_generation_think_cue(monkeypatch):
+    template = (
+        "Assistant: "
+        "{% if rwkv_generation_prompt == 'open_think' %}<think"
+        "{% else %}<think></think{% endif %}"
+    )
+    model, _ = _build_rwkv7_http(
+        monkeypatch,
+        chat_template_source=template,
+        rwkv_generation_prompt="no_think",
+    )
+
+    assert (
+        model.apply_chat_template([{"role": "user", "content": "hello"}])
+        == "Assistant: "
+    )
+    assert model.get_model_info()["sampling_config"]["do_sample"] is False
+    assert model.get_model_info()["sampling_config"]["temperature"] == 0.0
+
+    payload = model._create_payload(
+        ["Assistant: "],
+        generate=True,
+        gen_kwargs={"until": [], "max_gen_toks": 12},
+    )
+    assert payload["temperature"] == 0.0
+    assert payload["generation_config"] == json.dumps(
+        model._generation_profile, separators=(",", ":"), sort_keys=True
+    )
+
+
 def test_rwkv7_http_create_payload_generate(monkeypatch):
     model, profile = _build_rwkv7_http(monkeypatch)
 

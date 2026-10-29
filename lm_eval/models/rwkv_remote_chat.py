@@ -65,7 +65,9 @@ class RWKV7RemoteChat(LocalChatCompletion):
         if rwkv_prompt_template not in self.PROMPT_TEMPLATES:
             raise ValueError("rwkv_prompt_template must be assistant, bot, or function_calling.")
         if rwkv_generation_prompt not in self.GENERATION_PROMPTS:
-            raise ValueError("rwkv_generation_prompt must be open_think or fake_think.")
+            raise ValueError(
+                "rwkv_generation_prompt must be no_think, open_think, or fake_think."
+            )
 
         kwargs.setdefault("max_gen_toks", MAX_NEW_TOKENS)
         self.rwkv_prompt_template = rwkv_prompt_template
@@ -381,6 +383,10 @@ class RWKV7RemoteChat(LocalChatCompletion):
             "rwkv_prompt_template": self.rwkv_prompt_template,
             "rwkv_generation_prompt": self.rwkv_generation_prompt,
         }
+        if self.rwkv_generation_prompt == "no_think":
+            payload["generation_config"] = json.dumps(
+                self._generation_profile, separators=(",", ":"), sort_keys=True
+            )
 
         return payload
 

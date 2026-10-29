@@ -4,6 +4,7 @@ import pytest
 
 from lm_eval.api.instance import Instance
 from lm_eval.api.registry import get_model
+from lm_eval.models.rwkv_lightning import RWKV7LightningCUDA
 from lm_eval.models.rwkv_remote import RWKV7Remote
 
 
@@ -303,6 +304,53 @@ def test_rwkv7_remote_open_think_uses_its_own_fixed_sampling_config(monkeypatch)
     }
 
 
+def test_rwkv7_remote_no_think_uses_deterministic_sampling_config(monkeypatch):
+    monkeypatch.setenv("RWKV_API_KEY", "test-key")
+    model = _build(rwkv_generation_prompt="no_think")
+
+    assert model.get_model_info() == {
+        "sampling_config": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "penalty_decay": 1.0,
+            "do_sample": False,
+            "stop": ["\nUser:"],
+        }
+    }
+
+
+def test_rwkv7_remote_no_think_renders_legacy_official_template(monkeypatch):
+    monkeypatch.setenv("RWKV_API_KEY", "test-key")
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token = "<eos>"
+        eos_token_id = 0
+        bos_token_id = 1
+        # The official tokenizer template rejects values other than open_think
+        # and fake_think before selecting its generation cue.
+        chat_template = (
+            "{% if rwkv_generation_prompt not in ['open_think', 'fake_think'] %}"
+            "{{ raise_exception('Unsupported RWKV generation prompt') }}"
+            "{% endif %}Assistant: "
+            "{% if rwkv_generation_prompt == 'open_think' %}<think"
+            "{% else %}<think></think{% endif %}"
+        )
+
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=FakeTokenizer()):
+        model = _build(tokenizer="some/repo", rwkv_generation_prompt="no_think")
+
+    rendered = model.apply_chat_template(
+        [{"role": "user", "content": "Question?"}], add_generation_prompt=True
+    )
+    assert rendered.endswith("Assistant: ")
+    assert "<think" not in rendered
+    assert model.get_model_info()["sampling_config"]["do_sample"] is False
+
+
 def test_rwkv7_remote_parse_generations_reports_finish_reason():
     outputs = {
         "choices": [
@@ -502,3 +550,206 @@ def test_rwkv7_remote_loglikelihood_attaches_real_generation_as_evidence(monkeyp
         assert "Answer with only the letter" in outcome.prompt
         assert "A. one" in outcome.prompt
         assert "B. two" in outcome.prompt
+
+
+class _LightningTokenizer:
+    pad_token_id = 0
+    eos_token = "<eos>"
+    eos_token_id = 0
+    bos_token_id = 1
+    chat_template = _ASSISTANT_STYLE_TEMPLATE
+
+    def __call__(self, text, **kwargs):
+        from types import SimpleNamespace
+
+        if isinstance(text, str):
+            input_ids = list(range(len(text)))
+        else:
+            input_ids = [list(range(len(value))) for value in text]
+        return SimpleNamespace(input_ids=input_ids)
+
+
+def _build_lightning(**kwargs):
+    kwargs.setdefault("model", "rwkv7-g1k-1.5b")
+    kwargs.setdefault("tokenizer", "official-tokenizer")
+    kwargs.setdefault("num_concurrent", 1)
+    with patch(
+        "transformers.AutoTokenizer.from_pretrained",
+        return_value=_LightningTokenizer(),
+    ):
+        return RWKV7LightningCUDA(**kwargs)
+
+
+def test_rwkv7_lightning_payload_uses_native_batch_fields_and_context_budget():
+    model = _build_lightning(
+        batch_size=2,
+        max_length=20,
+        rwkv_generation_prompt="open_think",
+    )
+
+    payload = model._create_payload(
+        ["short", "tenletters"],
+        generate=True,
+        gen_kwargs={
+            "max_gen_toks": 16,
+            "until": ["END"],
+            "seed": 99,
+            "presence_penalty": 9.0,
+        },
+    )
+
+    assert payload["contents"] == ["short", "tenletters"]
+    assert payload["max_tokens"] == 10
+    assert payload["temperature"] == 0.96
+    assert payload["top_p"] == 0.76
+    assert payload["top_k"] == 32
+    assert payload["alpha_presence"] == 1.0
+    assert payload["alpha_frequency"] == 0.1
+    assert payload["alpha_decay"] == 0.988
+    assert payload["force_reasoning"] is True
+    assert payload["stop"] == ["END", *model.TRANSPORT_STOPS]
+    assert "prompt" not in payload
+    assert "seed" not in payload
+    assert "presence_penalty" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+def test_rwkv7_lightning_native_batch_dispatches_one_http_request(monkeypatch):
+    model = _build_lightning(batch_size=2, max_length=64, stream=False)
+    captured = []
+
+    class Response:
+        ok = True
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "first"},
+                        "finish_reason": "stop",
+                    },
+                    {
+                        "index": 1,
+                        "message": {"role": "assistant", "content": "second"},
+                        "finish_reason": "length",
+                    },
+                ]
+            }
+
+    def post(url, **kwargs):
+        captured.append((url, kwargs["json"]))
+        return Response()
+
+    monkeypatch.setattr("lm_eval.models.api_models.requests.post", post)
+    requests = [
+        Instance("generate_until", {}, (prompt, {"max_gen_toks": 8, "until": []}), index)
+        for index, prompt in enumerate(("question one", "question two"))
+    ]
+
+    generations = model.generate_until(requests)
+
+    assert [str(value) for value in generations] == ["first", "second"]
+    assert [value.truncated for value in generations] == [False, True]
+    assert len(captured) == 1
+    assert captured[0][0].endswith("/v1/batch/completions")
+    assert captured[0][1]["contents"] == ["question one", "question two"]
+
+
+def test_rwkv7_lightning_strips_retained_matched_stop_from_scored_text():
+    output = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is B.\nUser:",
+                },
+                "finish_reason": "stop",
+                "matched_stop": "\nUser:",
+            }
+        ]
+    }
+
+    (generation,) = RWKV7LightningCUDA.parse_generations(output)
+
+    assert str(generation) == "The answer is B."
+    assert generation.finish_reason == "stop"
+    assert generation.raw_response is output
+
+
+def test_rwkv7_lightning_is_registered():
+    assert get_model("rwkv7-lightning-cuda") is RWKV7LightningCUDA
+
+
+def test_rwkv7_lightning_no_think_uses_minimum_supported_temperature():
+    model = _build_lightning(rwkv_generation_prompt="no_think")
+
+    payload = model._create_payload(
+        "question", generate=True, gen_kwargs={"max_gen_toks": 8, "until": []}
+    )
+
+    assert payload["temperature"] == 0.01
+
+
+def test_rwkv7_lightning_no_think_renders_closed_think_prefix():
+    model = _build_lightning(rwkv_generation_prompt="no_think")
+
+    rendered = model.apply_chat_template(
+        [{"role": "user", "content": "question"}], add_generation_prompt=True
+    )
+
+    assert rendered.endswith("Assistant: <think></think>\n")
+    assert model.rwkv_generation_prompt == "no_think"
+
+
+def test_rwkv7_lightning_reads_cloudflare_access_headers(monkeypatch):
+    monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "client-id")
+    monkeypatch.setenv("CF_ACCESS_CLIENT_SECRET", "client-secret")
+    model = _build_lightning()
+
+    assert model.header["CF-Access-Client-Id"] == "client-id"
+    assert model.header["CF-Access-Client-Secret"] == "client-secret"
+
+
+def test_rwkv7_lightning_reports_actual_transport_sampling_contract():
+    model = _build_lightning(rwkv_generation_prompt="no_think")
+
+    sampling = model.get_model_info()["sampling_config"]
+
+    assert sampling["temperature"] == 0.01
+    assert sampling["stop"] == list(model.TRANSPORT_STOPS)
+    assert sampling["seed"] == -1
+    assert sampling["seed_strategy"] == "unsupported"
+
+
+def test_rwkv7_lightning_requires_complete_sse_stream():
+    events = [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "OK<EOD>"},
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                    "matched_stop": "<EOD>",
+                }
+            ]
+        },
+    ]
+
+    output = RWKV7LightningCUDA._sse_output(events, expected=1, saw_done=True)
+    (generation,) = RWKV7LightningCUDA.parse_generations(output)
+
+    assert str(generation) == "OK"
+    with pytest.raises(Exception, match="without data: \\[DONE\\]"):
+        RWKV7LightningCUDA._sse_output(events, expected=1, saw_done=False)
