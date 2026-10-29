@@ -3,6 +3,7 @@ import sys
 import textwrap
 
 from lm_eval._cli.ls import List
+from lm_eval._cli.publish import Publish
 from lm_eval._cli.run import Run
 from lm_eval._cli.validate import Validate
 
@@ -42,6 +43,7 @@ class HarnessCLI:
         Run.create(self._subparsers)
         List.create(self._subparsers)
         Validate.create(self._subparsers)
+        Publish.create(self._subparsers)
 
     def parse_args(self) -> argparse.Namespace:
         """Parse arguments using the main parser."""
