@@ -647,3 +647,83 @@ def aggregate_subtask_metrics(metrics, sizes, weight_by_size=True):
     assert len(metrics) == len(sizes)
 
     return sum([metric * size for metric, size in zip(metrics, sizes)]) / sum(sizes)
+
+
+_PRIMARY_METRIC_PRIORITY = ("acc", "exact_match", "f1", "acc_norm")
+
+
+def aggregate_benchmark_fallback(
+    benchmark_name: str,
+    leaf_task_names: List[str],
+    task_metrics: dict,
+) -> "tuple[dict, Optional[str]]":
+    """Weighted-average fallback for group_fallback/tag_fallback benchmarks.
+
+    Only aggregates metric names reported by every leaf that has results
+    (mirrors how homogeneous tag families like xquad/model_written_evals/
+    inverse_scaling_prize/discrim_eval are reported in practice). If no
+    metric name is common to all leaves (infinitebench, cruxeval mix
+    genuinely different task types/metrics with no shared name), no
+    synthetic headline score is produced -- matches how those benchmarks'
+    source papers report them (per-task tables, no single blended score).
+    """
+    leaves_with_metrics = [leaf for leaf in leaf_task_names if leaf in task_metrics]
+    sample_len_total = sum(
+        task_metrics[leaf].get("sample_len", 0) for leaf in leaves_with_metrics
+    )
+    result: dict = {
+        "name": benchmark_name,
+        "alias": benchmark_name,
+        "sample_len": sample_len_total,
+    }
+    if not leaves_with_metrics:
+        return result, None
+
+    def metric_names(leaf: str) -> set:
+        return {
+            k.split(",", 1)[0]
+            for k in task_metrics[leaf]
+            if isinstance(k, str)
+            and "," in k
+            and not k.split(",", 1)[0].endswith("_stderr")
+        }
+
+    common_metrics = set.intersection(
+        *(metric_names(leaf) for leaf in leaves_with_metrics)
+    )
+
+    sample_count: dict = {}
+    for metric in sorted(common_metrics):
+        filters = {
+            k.split(",", 1)[1]
+            for leaf in leaves_with_metrics
+            for k in task_metrics[leaf]
+            if isinstance(k, str) and k.startswith(f"{metric},")
+        }
+        for filt in sorted(filters):
+            key, stderr_key = f"{metric},{filt}", f"{metric}_stderr,{filt}"
+            values, sizes, stderrs = [], [], []
+            for leaf in leaves_with_metrics:
+                m = task_metrics[leaf]
+                if key not in m:
+                    continue
+                values.append(m[key])
+                sizes.append(m.get("sample_len", 0))
+                if m.get(stderr_key) is not None:
+                    stderrs.append(m[stderr_key])
+            if not values:
+                continue
+            result[key] = aggregate_subtask_metrics(values, sizes, weight_by_size=True)
+            sample_count[key] = sum(sizes)
+            result[stderr_key] = (
+                pooled_sample_stderr(stderrs, sizes)
+                if len(stderrs) == len(values) and "N/A" not in stderrs
+                else "N/A"
+            )
+    if sample_count:
+        result["sample_count"] = sample_count
+
+    primary = next((m for m in _PRIMARY_METRIC_PRIORITY if m in common_metrics), None)
+    if primary is None and common_metrics:
+        primary = sorted(common_metrics)[0]
+    return result, primary
