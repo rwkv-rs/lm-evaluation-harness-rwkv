@@ -1,4 +1,9 @@
 "dataset_name": "engineering_math"
+dataset_path: csv
+dataset_kwargs:
+  data_files:
+    train: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/engineering_math_dev.csv
+    test: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/engineering_math_test.csv
 "description": "以下為工程數學的單選題，請提供正確答案的選項。\n\n"
 "tag": "tmmluplus_STEM_tasks"
 "include": "_tmmluplus_template_yaml"

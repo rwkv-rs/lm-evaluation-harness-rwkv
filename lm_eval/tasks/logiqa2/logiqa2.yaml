@@ -1,6 +1,8 @@
 task: logiqa2
 dataset_path: baber/logiqa2
 dataset_name: logiqa2
+dataset_kwargs:
+  revision: 4e294f9878e845c7ed2ca1f9c4f6aa4fe0693786
 output_type: multiple_choice
 training_split: train
 validation_split: validation

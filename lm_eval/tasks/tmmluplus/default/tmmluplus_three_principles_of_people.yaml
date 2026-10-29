@@ -1,4 +1,9 @@
 "dataset_name": "three_principles_of_people"
+dataset_path: csv
+dataset_kwargs:
+  data_files:
+    train: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/three_principles_of_people_dev.csv
+    test: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/three_principles_of_people_test.csv
 "description": "以下為三民主義的單選題，請提供正確答案的選項。\n\n"
 "tag": "tmmluplus_social_sciences_tasks"
 "include": "_tmmluplus_template_yaml"

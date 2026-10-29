@@ -127,11 +127,11 @@ if __name__ == "__main__":
     df = pd.read_csv(SUBJECT_FILE, delimiter="\t")
 
     for _, row in df.iterrows():
-        for _c in categories:
+        for category_name, subjects in categories.items():
             if row["subject"] in SUBJECTS:
                 raise ValueError("Duplicate tasks.")
-            if row["category"] in categories[_c]:  # append new item into SUBJECTS
-                SUBJECTS[row["subject"]] = _c
+            if row["category"] in subjects:  # append new item into SUBJECTS
+                SUBJECTS[row["subject"]] = category_name
                 subject2name[row["subject"]] = row["name"]
                 break
     # End of SUBJECTS initialization
@@ -170,6 +170,21 @@ if __name__ == "__main__":
             else f"tmmluplus_{subject}",
             "task_alias": subject.replace("_", " "),
             "dataset_name": subject,
+            "dataset_path": "csv",
+            "dataset_kwargs": {
+                "data_files": {
+                    "train": (
+                        "hf://datasets/ZoneTwelve/tmmluplus@"
+                        "0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/"
+                        f"data/{subject}_dev.csv"
+                    ),
+                    "test": (
+                        "hf://datasets/ZoneTwelve/tmmluplus@"
+                        "0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/"
+                        f"data/{subject}_test.csv"
+                    ),
+                }
+            },
             "description": description,
         }
 
