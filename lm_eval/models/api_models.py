@@ -5,6 +5,9 @@ import itertools
 import json
 import logging
 import os
+import re
+from contextlib import AsyncExitStack
+from dataclasses import replace
 from functools import cached_property
 from typing import (
     TYPE_CHECKING,
@@ -24,7 +27,13 @@ from typing import (
 try:
     import requests
     from aiohttp import ClientSession, ClientTimeout, TCPConnector
-    from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
+    from tenacity import (
+        RetryError,
+        retry,
+        retry_if_not_exception_type,
+        stop_after_attempt,
+        wait_exponential,
+    )
     from tqdm import tqdm
     from tqdm.asyncio import tqdm_asyncio
 except ModuleNotFoundError:
@@ -36,6 +45,7 @@ from importlib.util import find_spec
 from io import BytesIO
 
 from lm_eval import utils
+from lm_eval.api.checkpoint import ItemKey, serialize_response
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import TemplateLM
 from lm_eval.models.utils import Collator, chunks, configure_pad_token
@@ -55,6 +65,56 @@ LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER = os.environ.get(
 eval_logger = logging.getLogger(__name__)
 
 LogLikelihoodInputs = Tuple[Tuple[str, str], List[int], List[int]]
+
+# Status codes worth retrying. The retry policy itself lives in the tenacity
+# wrapper around ``model_call``/``amodel_call`` (see ``get_batched_requests``),
+# mirroring lighteval-rwkv's single flat request budget: one endpoint, one
+# concurrency limit, exponential backoff on failure.
+RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+_CONTEXT_LENGTH_ERROR = re.compile(r"prompt contains at least (\d+) input tokens")
+_MAX_TOKEN_KEYS = ("max_tokens", "max_completion_tokens")
+
+
+class ApiRequestError(RuntimeError):
+    """Raised when an HTTP request to the model endpoint cannot be completed."""
+
+
+class ContextLengthExhausted(ApiRequestError):
+    """Raised when a request's prompt tokens leave no positive token budget
+    for a completion, even after shrinking the requested max tokens to fit.
+    """
+
+
+def context_error_prompt_tokens(status: int, body_text: str) -> Optional[int]:
+    """Extract "prompt contains at least N input tokens" from a vLLM-style
+    400/422 error body, or ``None`` if this isn't a context-length error.
+    """
+    if status not in (400, 422) or not body_text:
+        return None
+    match = _CONTEXT_LENGTH_ERROR.search(body_text)
+    return int(match.group(1)) if match else None
+
+
+def shrink_max_tokens(payload: dict, available: int) -> Optional[dict]:
+    """Return a copy of ``payload`` with its max-tokens field shrunk to fit
+    ``available`` tokens, or ``None`` if there's no positive budget left or
+    no max-tokens field to shrink (caller should treat both as "exhausted").
+    """
+    if available <= 0:
+        return None
+    for key in _MAX_TOKEN_KEYS:
+        if key not in payload or payload[key] is None:
+            continue
+        new_value = min(int(payload[key]), available)
+        if new_value <= 0:
+            return None
+        if new_value == payload[key]:
+            return None
+        adjusted = dict(payload)
+        adjusted[key] = new_value
+        return adjusted
+    return None
 
 
 # utility class to keep track of json encoded chats
@@ -108,8 +168,32 @@ def create_image_prompt(
     return chat
 
 
+class _ContextExhaustedCompletion(str):
+    """Placeholder generation result for a request whose prompt tokens alone
+    leave no positive completion budget, even after shrinking max_tokens to
+    fit (see ``ContextLengthExhausted`` above).
+
+    Duck-type compatible with ``openai_completions._RWKVCompletion`` (same
+    ``finish_reason``/``raw_response``/``truncated`` attributes), since
+    ``evaluator.py::response_evidence()`` only accesses them via ``getattr``
+    with defaults -- this lets that existing truncation-reporting path pick
+    it up without a circular import back into ``openai_completions``.
+    """
+
+    def __new__(cls):
+        value = super().__new__(cls, "")
+        value.finish_reason = "length"
+        value.raw_response = None
+        value.prompt_token_ids = None
+        value.output_token_ids = None
+        value.reasoning = None
+        value.truncated = True
+        return value
+
+
 class TemplateAPI(TemplateLM):
     MULTIMODAL = True
+    _supports_checkpoint_items = True
 
     def __init__(
         self,
@@ -124,7 +208,10 @@ class TemplateAPI(TemplateLM):
             Literal["tiktoken", "huggingface", "remote", "None", "none"]
         ] = "huggingface",
         truncate: bool = False,
-        # number of concurrent requests. More useful if not batching
+        # Flat request budget for this endpoint: the number of prompts that may
+        # be in flight at once. Derived from the served endpoint's own
+        # ``max_num_seqs`` by the versioned RWKV config, so callers never hand
+        # tune it (see lighteval-rwkv's ``concurrent_requests``).
         num_concurrent: int = 1,
         max_retries: int = 3,
         max_gen_toks: int = 256,
@@ -146,9 +233,11 @@ class TemplateAPI(TemplateLM):
         timeout: int = 300,
         header: Optional[Dict[str, str]] = None,
         max_images: int = 1,
+        send_idempotency_key: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+        self.send_idempotency_key = send_idempotency_key
         missing_packages = [
             pkg
             for pkg in ["aiohttp", "tqdm", "tenacity", "requests"]
@@ -183,6 +272,7 @@ class TemplateAPI(TemplateLM):
                 "Concurrent requests are disabled. To enable concurrent requests, set `num_concurrent` > 1."
             )
         self._concurrent = int(num_concurrent)
+        self.base_url = base_url
         self.tokenizer_backend = (
             None if tokenizer_backend in ("None", "none") else tokenizer_backend
         )
@@ -453,36 +543,81 @@ class TemplateAPI(TemplateLM):
         elif self.tokenizer_backend == "remote":
             return self.tokenizer.batch_decode(tokens)
 
+    def _endpoint_url(self) -> str:
+        """The single endpoint every request of this model goes to.
+
+        Subclasses (e.g. ``AzureOpenaiChatCompletionsLM``) may call
+        ``super().__init__()`` with no arguments and set ``self.base_url``
+        directly afterwards, so the URL is validated at dispatch time rather
+        than at construction time.
+        """
+        if not self.base_url:
+            raise ApiRequestError(
+                "No base_url configured; cannot dispatch API requests."
+            )
+        return self.base_url
+
+    def _annotate_generation(self, value, gen_kwargs):
+        if not getattr(self, "INDEPENDENT_ROLLOUTS", False) or value is None:
+            return value
+        from lm_eval.models.openai_completions import _RWKVCompletion
+        if not hasattr(value, "__dict__"):
+            value = _RWKVCompletion(str(value))
+        value.seed = (gen_kwargs or {}).get("seed", self._seed)
+        value.requires_think_close = getattr(self, "rwkv_generation_prompt", None) == "open_think"
+        return value
+
     def model_call(
         self,
         messages: Union[List[List[int]], List[str], List[JsonChatStr]],
         *,
         generate: bool = True,
         gen_kwargs: Optional[Dict] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> Optional[dict]:
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
+        headers = {**self.header, **extra_headers} if extra_headers else self.header
+        payload = self._create_payload(
+            self.create_message(messages),
+            generate=generate,
+            gen_kwargs=gen_kwargs,
+            seed=self._seed,
+            eos=self.eos_string,
+            **kwargs,
+        )
         try:
-            response = requests.post(
-                self.base_url,
-                json=self._create_payload(
-                    self.create_message(messages),
-                    generate=generate,
-                    gen_kwargs=gen_kwargs,
-                    seed=self._seed,
-                    eos=self.eos_string,
-                    **kwargs,
-                ),
-                headers=self.header,
-                verify=self.verify_certificate,
-            )
-            if not response.ok:
+            url = self._endpoint_url()
+            while True:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    verify=self.verify_certificate,
+                    timeout=self.timeout,
+                )
+                if response.ok:
+                    return response.json()
                 eval_logger.warning(
                     f"API request failed with error message: {response.text}. Retrying..."
                 )
-            response.raise_for_status()
-            return response.json()
+                prompt_tokens = context_error_prompt_tokens(
+                    response.status_code, response.text
+                )
+                if prompt_tokens is not None:
+                    adjusted = shrink_max_tokens(payload, self.max_length - prompt_tokens)
+                    if adjusted is not None:
+                        payload = adjusted
+                        continue
+                    raise ContextLengthExhausted(
+                        f"Prompt requires at least {prompt_tokens} input tokens, "
+                        f"leaving no positive completion budget within max_length={self.max_length}."
+                    )
+                # Any other failure -- retryable status or not -- is left to the
+                # caller's tenacity policy, which re-issues the request against
+                # the same endpoint with exponential backoff.
+                raise ApiRequestError(f"HTTP {response.status_code}: {response.text}")
         except RetryError:
             eval_logger.error(
                 "API request failed after multiple retries. Please check the API status."
@@ -497,6 +632,7 @@ class TemplateAPI(TemplateLM):
         *,
         generate: bool = True,
         cache_keys: list = None,
+        item_keys: Optional[List[Optional[ItemKey]]] = None,
         ctxlens: Optional[List[int]] = None,
         gen_kwargs: Optional[Dict] = None,
         **kwargs,
@@ -511,22 +647,54 @@ class TemplateAPI(TemplateLM):
             **kwargs,
         )
         cache_method = "generate_until" if generate else "loglikelihood"
+        extra_headers = None
+        if (
+            self.send_idempotency_key
+            and item_keys
+            and len(item_keys) == 1
+            and item_keys[0] is not None
+        ):
+            extra_headers = {"Idempotency-Key": item_keys[0].idempotency_key}
+        request_headers = (
+            {**self.header, **extra_headers} if extra_headers else self.header
+        )
+        url = self._endpoint_url()
+
         acquired = await sem.acquire()
         try:
-            async with session.post(
-                self.base_url,
-                json=payload,
-                headers=self.header,
-            ) as response:
-                if not response.ok:
+            outputs = None
+            while outputs is None:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=request_headers,
+                ) as response:
+                    if response.ok:
+                        outputs = await response.json()
+                        break
                     error_text = await response.text()
                     eval_logger.warning(
                         f"API request failed! Status code: {response.status}, "
                         f"Response text: {error_text}. Retrying..."
                     )
-                # raising exception will retry the request
-                response.raise_for_status()
-                outputs = await response.json()
+                    prompt_tokens = context_error_prompt_tokens(
+                        response.status, error_text
+                    )
+                    if prompt_tokens is not None:
+                        adjusted = shrink_max_tokens(
+                            payload, self.max_length - prompt_tokens
+                        )
+                        if adjusted is not None:
+                            payload = adjusted
+                            continue
+                        raise ContextLengthExhausted(
+                            f"Prompt requires at least {prompt_tokens} input tokens, "
+                            f"leaving no positive completion budget within max_length={self.max_length}."
+                        )
+                    # Any other failure -- retryable status or not -- is left to
+                    # the caller's tenacity policy, which re-issues the request
+                    # against the same endpoint with exponential backoff.
+                    raise ApiRequestError(f"HTTP {response.status}: {error_text}")
             tmp_answers = (
                 self.parse_generations(
                     outputs=outputs,
@@ -538,6 +706,9 @@ class TemplateAPI(TemplateLM):
                     ctxlens=ctxlens,
                 )
             )
+
+            if generate:
+                tmp_answers = [self._annotate_generation(value, gen_kwargs) for value in tmp_answers]
 
             # Convert `None`` values to `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` string to maintain consistency
             answers = []
@@ -553,6 +724,14 @@ class TemplateAPI(TemplateLM):
             if cache_keys:
                 for res, cache in zip(answers, cache_keys):
                     self.cache_hook.add_partial(cache_method, cache, res)
+            if item_keys and self.checkpoint_store is not None:
+                completed = [
+                    (key.item_id, serialize_response(res))
+                    for key, res in zip(item_keys, answers)
+                    if key is not None
+                ]
+                if completed:
+                    await self.checkpoint_store.mark_items_completed_async(completed)
             return answers
         # If the retries also fail
         except BaseException as e:
@@ -564,12 +743,15 @@ class TemplateAPI(TemplateLM):
 
     def batch_loglikelihood_requests(
         self, chunks: Iterable[List[LogLikelihoodInputs]]
-    ) -> Tuple[List[List[int]], List[int], List[Tuple[str, str]]]:
+    ) -> Tuple[List[List[int]], List[int], List[Tuple[str, str]], List[Optional[ItemKey]]]:
         inputs = []
         ctxlens = []
         cache_keys = []
+        item_keys = []
         for chunk in chunks:
-            for cache_key, context_enc, continuation_enc in chunk:
+            for item in chunk:
+                cache_key, context_enc, continuation_enc = item[:3]
+                item_key = item[3] if len(item) > 3 else None
                 # max_length - 1 as we always have 1 token for generation
                 inp = (context_enc + continuation_enc)[-self.max_length :]
                 if len(inp) < len(context_enc + continuation_enc):
@@ -583,7 +765,8 @@ class TemplateAPI(TemplateLM):
                 inputs.append(inp)
                 ctxlens.append(ctxlen)
                 cache_keys.append(cache_key)
-        return inputs, ctxlens, cache_keys
+                item_keys.append(item_key)
+        return inputs, ctxlens, cache_keys, item_keys
 
     async def get_batched_requests(
         self,
@@ -592,49 +775,118 @@ class TemplateAPI(TemplateLM):
         *,
         generate: bool = True,
         ctxlens: List[int] = None,
+        item_keys: Optional[List[Optional[ItemKey]]] = None,
         **kwargs,
     ) -> Union[List[List[str]], List[List[Tuple[float, bool]]]]:
         ctxlens = ctxlens if ctxlens else [None] * len(requests)
-        conn = TCPConnector(limit=self._concurrent, ssl=self.verify_certificate)
+        item_keys = item_keys if item_keys else [None] * len(requests)
+        per_request_kwargs = kwargs.pop("gen_kwargs_per_request", None)
+        if per_request_kwargs is not None and (len(per_request_kwargs) != len(requests) or self._batch_size != 1):
+            raise ValueError("per-request generation kwargs require one request per batch")
+        self._endpoint_url()
         sem = asyncio.Semaphore(self._concurrent)
-        async with ClientSession(
-            connector=conn, timeout=ClientTimeout(total=self.timeout)
-        ) as session:
+        async with AsyncExitStack() as stack:
+            # One session, one connection pool, one flat concurrency budget:
+            # exactly the endpoint's declared ``max_num_seqs`` requests may be
+            # in flight, so the evaluator queues at the inference server
+            # instead of falling into lockstep with it.
+            session = await stack.enter_async_context(
+                ClientSession(
+                    connector=TCPConnector(
+                        limit=self._concurrent, ssl=self.verify_certificate
+                    ),
+                    timeout=ClientTimeout(total=self.timeout),
+                )
+            )
             retry_: Callable[..., Awaitable[Any]] = retry(
                 stop=stop_after_attempt(self.max_retries),
                 wait=wait_exponential(multiplier=0.5, min=1, max=10),
                 reraise=True,
+                retry=retry_if_not_exception_type(ContextLengthExhausted),
                 before_sleep=lambda retry_state: eval_logger.info(
                     f"Retry attempt {retry_state.attempt_number}"
                 ),
             )(self.amodel_call)
-            # Create tasks for each batch of request
-            tasks = [
-                asyncio.create_task(
-                    retry_(
+
+            async def _guarded(
+                message: list, cache_key: list, ctxlen: list, item_key: list, request_kwargs: dict
+            ) -> list:
+                try:
+                    return await retry_(
                         session=session,
                         sem=sem,
                         messages=message,
                         cache_keys=cache_key,
+                        item_keys=item_key,
                         generate=generate,
                         ctxlens=ctxlen,
-                        **kwargs,
+                        **request_kwargs,
                     )
-                )
-                for message, cache_key, ctxlen in zip(
+                except ContextLengthExhausted as e:
+                    if getattr(self, "PRESERVE_INPUT_CONTEXT", False):
+                        raise
+                    eval_logger.warning(
+                        f"Context length exhausted for one batch; recording "
+                        f"placeholder result(s) instead of failing the run: {e}"
+                    )
+                    placeholder = (
+                        _ContextExhaustedCompletion() if generate else (0.0, False)
+                    )
+                    answers = [placeholder] * len(message)
+                    completed = [
+                        (key.item_id, serialize_response(res))
+                        for key, res in zip(item_key, answers)
+                        if key is not None
+                    ]
+                    if completed and self.checkpoint_store is not None:
+                        await self.checkpoint_store.mark_items_completed_async(
+                            completed
+                        )
+                    return answers
+
+            # Create tasks for each batch of request. Subclasses that never
+            # dispatch HTTP themselves (e.g. LiteLLMChatCompletion) accept the
+            # session argument and ignore it.
+            tasks = [
+                asyncio.create_task(_guarded(
+                    message, cache_key, ctxlen, item_key,
+                    {**kwargs, **({"gen_kwargs": per_request_kwargs[index]} if per_request_kwargs is not None else {})},
+                ))
+                for index, (message, cache_key, ctxlen, item_key) in enumerate(zip(
                     chunks(requests, n=self._batch_size),
                     chunks(cache_keys, n=self._batch_size),
                     chunks(ctxlens, n=self._batch_size),
-                )
+                    chunks(item_keys, n=self._batch_size),
+                ))
             ]
 
-            return await tqdm_asyncio.gather(*tasks, desc="Requesting API")
+            try:
+                return await tqdm_asyncio.gather(*tasks, desc="Requesting API")
+            except BaseException:
+                # `gather()` raises on the first failing task but does not
+                # cancel the rest, which would otherwise keep running against
+                # the `ClientSession`s this `async with` block is about to
+                # close on unwind (-> ServerDisconnectedError/RuntimeError
+                # storms) and, worse, can leave them cancelled while blocked
+                # draining on shared session state. Cancel and drain them here,
+                # while the session is still open, instead of leaving that to
+                # asyncio.run()'s teardown-time mass-cancel.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
     def _loglikelihood_tokens(self, requests, **kwargs) -> List[Tuple[float, bool]]:
         assert self.tokenizer is not None, (
             "Tokenizer is required for loglikelihood tasks to compute context lengths."
         )
         res = []
+        item_keys = kwargs.pop("item_keys", None)
+        if item_keys:
+            requests = [
+                (*req, key) for req, key in zip(requests, item_keys, strict=True)
+            ]
 
         def _collate(req: LogLikelihoodInputs):
             """Defines the key for the sorted method"""
@@ -658,20 +910,43 @@ class TemplateAPI(TemplateLM):
         if self._concurrent <= 1:
             pbar = tqdm(desc="Requesting API", total=len(requests))
             for chunk in chunked:
-                inputs, ctxlens, cache_keys = self.batch_loglikelihood_requests([chunk])
+                inputs, ctxlens, cache_keys, item_keys = (
+                    self.batch_loglikelihood_requests([chunk])
+                )
 
-                outputs = retry(
-                    stop=stop_after_attempt(self.max_retries),
-                    wait=wait_exponential(multiplier=0.5, min=1, max=10),
-                    reraise=True,
-                )(self.model_call)(messages=inputs, generate=False)
+                try:
+                    outputs = retry(
+                        stop=stop_after_attempt(self.max_retries),
+                        wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                        reraise=True,
+                        retry=retry_if_not_exception_type(ContextLengthExhausted),
+                    )(self.model_call)(messages=inputs, generate=False)
+                except ContextLengthExhausted as e:
+                    eval_logger.warning(
+                        f"Context length exhausted for loglikelihood request; "
+                        f"recording as (0.0, False) instead of failing the run: {e}"
+                    )
+                    for cache_key, item_key in zip(cache_keys, item_keys):
+                        answer_ = (0.0, False)
+                        res.append(answer_)
+                        if cache_key is not None:
+                            self.cache_hook.add_partial(
+                                "loglikelihood", cache_key, answer_
+                            )
+                        if item_key is not None and self.checkpoint_store is not None:
+                            self.checkpoint_store.mark_items_completed(
+                                [(item_key.item_id, serialize_response(answer_))]
+                            )
+                        pbar.update(1)
+                    continue
                 if isinstance(outputs, dict):
                     outputs = [outputs]
-                for answer_, cache_key in zip(
+                for answer_, cache_key, item_key in zip(
                     self.parse_logprobs(
                         outputs=outputs, tokens=inputs, ctxlens=ctxlens
                     ),
                     cache_keys,
+                    item_keys,
                 ):
                     if answer_ is not None:
                         res.append(answer_)
@@ -680,13 +955,23 @@ class TemplateAPI(TemplateLM):
                             self.cache_hook.add_partial(
                                 "loglikelihood", cache_key, answer_
                             )
+                        if item_key is not None and self.checkpoint_store is not None:
+                            self.checkpoint_store.mark_items_completed(
+                                [(item_key.item_id, serialize_response(answer_))]
+                            )
                         pbar.update(1)
         else:
-            inputs, ctxlens, cache_keys = self.batch_loglikelihood_requests(chunked)
+            inputs, ctxlens, cache_keys, item_keys = self.batch_loglikelihood_requests(
+                chunked
+            )
             res = itertools.chain.from_iterable(
                 asyncio.run(
                     self.get_batched_requests(
-                        inputs, cache_keys, generate=False, ctxlens=ctxlens
+                        inputs,
+                        cache_keys,
+                        generate=False,
+                        ctxlens=ctxlens,
+                        item_keys=item_keys,
                     )
                 )
             )
@@ -694,9 +979,44 @@ class TemplateAPI(TemplateLM):
         return re_ord.get_original(res)
 
     def generate_until(
-        self, requests: List[Instance], disable_tqdm: bool = False
+        self,
+        requests: List[Instance],
+        disable_tqdm: bool = False,
+        item_keys: Optional[List[Optional[ItemKey]]] = None,
     ) -> List[str]:
         res = []
+        if item_keys is None:
+            item_keys = [None] * len(requests)
+
+        if not requests:
+            return []
+        independent = getattr(self, "INDEPENDENT_ROLLOUTS", False)
+        strict_context = getattr(self, "PRESERVE_INPUT_CONTEXT", False)
+        prepared_seeds = []
+        if independent:
+            counts = {}
+            token_counts = {}
+            prepared = []
+            for request, key in zip(requests, item_keys, strict=True):
+                args = request.args
+                gen = dict(args[1])
+                slot = (request.task_name, request.doc_id)
+                ordinal = key.repeat_ord if key is not None else (
+                    request.idx if request.task_name is None else counts.get(slot, 0)
+                )
+                counts[slot] = counts.get(slot, 0) + 1
+                gen["seed"] = int(gen.get("seed", self._seed)) + ordinal
+                prepared_seeds.append(gen["seed"])
+                if strict_context and self.tokenized_requests:
+                    if args[0] not in token_counts:
+                        token_counts[args[0]] = len(self.tok_encode([args[0]], add_special_tokens=self.add_bos_token)[0])
+                    room = self.max_length - token_counts[args[0]]
+                    if room <= 0:
+                        raise ContextLengthExhausted("Prompt exhausts the context window; input was preserved")
+                    cap_key = "max_tokens" if "max_tokens" in gen else "max_gen_toks"
+                    gen[cap_key] = min(int(gen.get(cap_key, self._max_gen_toks)), room)
+                prepared.append(replace(request, arguments=(args[0], gen, *args[2:])))
+            requests = prepared
 
         def _collate_gen(_requests):
             # sort by the length of the non-tokenized contexts
@@ -732,13 +1052,17 @@ class TemplateAPI(TemplateLM):
         else:
             encodings_list = [None] * len(requests)
         requests = [
-            (a, b, c) for a, b, c in zip(requests, all_gen_kwargs, encodings_list)
+            (a, b, c, k)
+            for a, b, c, k in zip(
+                requests, all_gen_kwargs, encodings_list, item_keys
+            )
         ]
 
         re_ord = Collator(
             requests,
             sort_fn=_collate_gen,
             group_by="gen_kwargs",
+            group_fn=(lambda x: {} if independent else x[1]),
         )
         chunked = re_ord.get_batched(
             n=self._batch_size if self._concurrent <= 1 else 0, batch_fn=None
@@ -750,14 +1074,14 @@ class TemplateAPI(TemplateLM):
         if self._concurrent <= 1:
             pbar = tqdm(desc="Requesting API", total=len(requests))
             for chunk in chunked:
-                contexts, all_gen_kwargs, encodings_list = zip(*chunk)
+                contexts, all_gen_kwargs, encodings_list, chunk_item_keys = zip(*chunk)
                 if self.tokenized_requests:
                     max_gen_toks = all_gen_kwargs[0].get(
                         "max_gen_toks", self._max_gen_toks
                     )
                     max_context_len = self.max_length - max_gen_toks
 
-                    encodings_list = [x[-max_context_len:] for x in encodings_list]
+                    encodings_list = [x if strict_context else x[-max_context_len:] for x in encodings_list]
 
                     if any(
                         len(x) + max_gen_toks > self.max_length for x in encodings_list
@@ -767,21 +1091,34 @@ class TemplateAPI(TemplateLM):
                         )
 
                 req = encodings_list if self.tokenized_requests else contexts
-                outputs = retry(
-                    stop=stop_after_attempt(self.max_retries),
-                    wait=wait_exponential(multiplier=0.5, min=1, max=10),
-                    reraise=True,
-                )(self.model_call)(
-                    messages=req,
-                    generate=True,
-                    gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
-                )
-                for generated_text, context in zip(
-                    self.parse_generations(
+                try:
+                    outputs = retry(
+                        stop=stop_after_attempt(self.max_retries),
+                        wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                        reraise=True,
+                        retry=retry_if_not_exception_type(ContextLengthExhausted),
+                    )(self.model_call)(
+                        messages=req,
+                        generate=True,
+                        gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                    )
+                    generations = self.parse_generations(
                         outputs=outputs,
                         contexts=contexts,
-                    ),
+                    )
+                    generations = [self._annotate_generation(value, all_gen_kwargs[0]) for value in generations]
+                except ContextLengthExhausted as e:
+                    if strict_context:
+                        raise
+                    eval_logger.warning(
+                        f"Context length exhausted for generate_until request; "
+                        f"recording empty completion(s) instead of failing the run: {e}"
+                    )
+                    generations = [_ContextExhaustedCompletion()] * len(contexts)
+                for generated_text, context, item_key in zip(
+                    generations,
                     contexts,
+                    chunk_item_keys,
                 ):
                     # Always append to res to maintain the correct number of items
                     # even if generation failed (generated_text is None)
@@ -801,17 +1138,25 @@ class TemplateAPI(TemplateLM):
                             (context, all_gen_kwargs[0]),
                             generated_text,
                         )
+                    if (
+                        generated_text is not None
+                        and item_key is not None
+                        and self.checkpoint_store is not None
+                    ):
+                        self.checkpoint_store.mark_items_completed(
+                            [(item_key.item_id, serialize_response(generated_text))]
+                        )
                     pbar.update(1)
         else:
             for chunk in chunked:
-                contexts, all_gen_kwargs, encodings_list = zip(*chunk)
+                contexts, all_gen_kwargs, encodings_list, chunk_item_keys = zip(*chunk)
                 if self.tokenized_requests:
                     max_gen_toks = all_gen_kwargs[0].get(
                         "max_gen_toks", self._max_gen_toks
                     )
                     max_context_len = self.max_length - max_gen_toks
 
-                    encodings_list = [x[-max_context_len:] for x in encodings_list]
+                    encodings_list = [x if strict_context else x[-max_context_len:] for x in encodings_list]
 
                     if any(
                         len(x) + max_gen_toks > self.max_length for x in encodings_list
@@ -825,9 +1170,11 @@ class TemplateAPI(TemplateLM):
                     asyncio.run(
                         self.get_batched_requests(
                             req,
-                            cache_keys=[(ctx, all_gen_kwargs[0]) for ctx in contexts],
+                            cache_keys=list(zip(contexts, all_gen_kwargs, strict=True)),
+                            item_keys=list(chunk_item_keys),
                             generate=True,
                             gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                            **({"gen_kwargs_per_request": list(all_gen_kwargs)} if independent else {}),
                         )
                     )
                 )
@@ -835,7 +1182,17 @@ class TemplateAPI(TemplateLM):
                 for r in results:
                     res.append(r)
 
-        return re_ord.get_original(res)
+        ordered = re_ord.get_original(res)
+        if independent:
+            from lm_eval.models.openai_completions import _RWKVCompletion
+
+            for index, (value, seed) in enumerate(zip(ordered, prepared_seeds, strict=True)):
+                if not hasattr(value, "__dict__"):
+                    value = _RWKVCompletion(str(value))
+                    ordered[index] = value
+                value.seed = seed
+                value.requires_think_close = getattr(self, "rwkv_generation_prompt", None) == "open_think"
+        return ordered
 
     def loglikelihood_rolling(
         self, requests: List[Instance], disable_tqdm: bool = False

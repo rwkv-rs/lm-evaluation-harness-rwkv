@@ -31,7 +31,12 @@ dependencies = [
     "word2number",
     "more_itertools",
     "typing_extensions",
-    "tqdm>=4.59.0"
+    "tqdm>=4.59.0",
+    "aiohttp",
+    "requests",
+    "tenacity",
+    "jsonschema[format]>=4.0",
+    "tomli>=1.1.0; python_version < '3.11'",
 ]
 
 [tool.setuptools.packages.find]
@@ -80,13 +85,11 @@ math = ["sympy>=1.12", "antlr4-python3-runtime==4.11", "math_verify[antlr4_11_0]
 multilingual = ["nagisa>=0.2.7", "jieba>=0.42.1", "pycountry"]
 ruler = ["nltk", "wonderwords", "scipy"]
 sentencepiece = ["sentencepiece>=0.1.98"]
-discrim_eval = ["statsmodels==0.14.4"]
 unitxt = ["unitxt==1.22.0"]
 trackio = ["trackio>=0.23.0"]
 wandb = ["wandb>=0.16.3", "pandas", "numpy"]
 zeno = ["pandas", "zeno-client"]
 tasks = [
-    "lm_eval[discrim_eval]",
     "lm_eval[ifeval]",
     "lm_eval[japanese_leaderboard]",
     "lm_eval[longbench]",
@@ -104,11 +107,24 @@ dev1 = [
     "lm_eval[api]", "lm_eval[dev]", "lm_eval[hf]","sentencepiece"
 ]
 
+[tool.uv.sources]
+# rwkv7-remote's tokenizer_name path needs AutoTokenizer to resolve the
+# RwkvTokenizer class (backed by tokenizers' RwkvTrie model type), which only
+# exists in the authoritative rwkv-rs forks named in AGENTS.md's "权威 RWKV
+# Huggingface Transformers 适配仓库" entry -- PyPI stock transformers/tokenizers
+# cannot parse rwkv7-g1-st's tokenizer.json.
+transformers = { git = "https://github.com/rwkv-rs/transformers-rwkv.git", rev = "25674160e9786b191aa3642045f3615c05502af3" }
+tokenizers = { git = "https://github.com/rwkv-rs/tokenizers-rwkv.git", rev = "c5d8dde5ff49c70e4656199d5033a84e03c21b2b", subdirectory = "bindings/python" }
+
 [tool.uv]
 conflicts = [
     [
       { extra = "acpbench" },
       { extra = "math" },
+    ],
+    [
+      { extra = "acpbench" },
+      { extra = "vllm" },
     ],
     [
       { extra = "acpbench" },
@@ -157,6 +173,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.extend-per-file-ignores]
+"lm_eval/tasks/rwkv7_g1i_1_5b_20260805_ctx16384/utils.py" = ["BLE001"]
+"scripts/run_rwkv_five_benchmarks.py" = ["S603"]
+"scripts/run_rwkv_qwen_campaign.py" = ["S603"]
 "__init__.py" = [
     "F401",   # unused-import
     "F402",   # import-shadowed-by-loop-var
