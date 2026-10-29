@@ -1032,6 +1032,118 @@ wkv_mode = "fp32io16"
         assert cfg.metadata["wkv_mode"] == "fp32io16"
         assert cfg.metadata["cot_mode"] == "fake_think"
 
+    def test_toml_config_rwkv7_lightning_cuda_backend(self, tmp_path):
+        from lm_eval.config.evaluate_config import EvaluatorConfig
+
+        config = tmp_path / "config.toml"
+        config.write_text(
+            """
+schema_version = 1
+backend = "rwkv7-lightning-cuda"
+model_name = "rwkv7-g1k-1.5b"
+base_url = "http://127.0.0.1:8000/v1/batch/completions"
+tokenizer_name = "/weights/rwkv7-g1k-1.5b-tokenizer"
+benchmarks = ["race"]
+output_dir = "results/rwkv7-g1k-1.5b-lightning"
+max_length = 16384
+max_num_seqs = 32
+batch_size = 8
+request_concurrency = 30
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+""",
+            encoding="utf-8",
+        )
+
+        cfg = EvaluatorConfig.from_config(config)
+
+        assert cfg.model == "rwkv7-lightning-cuda"
+        assert cfg.batch_size == 8
+        assert cfg.model_args == {
+            "model": "rwkv7-g1k-1.5b",
+            "base_url": "http://127.0.0.1:8000/v1/batch/completions",
+            "tokenizer": "/weights/rwkv7-g1k-1.5b-tokenizer",
+            "num_concurrent": 30,
+            "max_length": 16384,
+            "max_gen_toks": 8192,
+            "rwkv_prompt_template": "assistant",
+            "rwkv_generation_prompt": "open_think",
+        }
+
+    def test_weight_revision_is_metadata_not_the_api_model_id(self, tmp_path):
+        """The API alias stays short; the full release name is run metadata.
+
+        model_name is the literal ``model=`` value the inference service must
+        recognize, so a release stem like
+        ``rwkv7-g1j-1.5b-20260831-ctx16384`` belongs in weight_revision.
+        Scoreboard publication reads the latter from the run metadata to get
+        the weight's ctx_len.
+        """
+        from lm_eval.config.evaluate_config import EvaluatorConfig
+
+        config = tmp_path / "config.toml"
+        config.write_text(
+            """
+schema_version = 1
+backend = "rwkv7-remote"
+model_name = "rwkv7-g1j-1.5b"
+weight_revision = "rwkv7-g1j-1.5b-20260831-ctx16384"
+base_url = "https://api.rwkv.rs/v1/completions"
+benchmarks = ["race"]
+output_dir = "results/rwkv7-g1j-1.5b-remote"
+max_length = 16384
+max_num_seqs = 5
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "fake_think"
+wkv_mode = "fp32io16"
+""",
+            encoding="utf-8",
+        )
+
+        cfg = EvaluatorConfig.from_config(config)
+
+        assert cfg.model_args["model"] == "rwkv7-g1j-1.5b"
+        assert cfg.metadata["weight_revision"] == "rwkv7-g1j-1.5b-20260831-ctx16384"
+
+    def test_toml_config_accepts_no_think_for_rwkv_backends(self, tmp_path):
+        from lm_eval.config.evaluate_config import EvaluatorConfig
+
+        for backend, base_url in (
+            ("rwkv7-http", "http://127.0.0.1:8000/v1/completions"),
+            ("rwkv7-remote", "https://api.rwkv.rs/v1/completions"),
+            ("rwkv7-remote-chat", "https://api.rwkv.rs/v1/chat/completions"),
+        ):
+            config = tmp_path / f"{backend}.toml"
+            config.write_text(
+                f'''
+schema_version = 1
+backend = "{backend}"
+model_name = "rwkv7-g1i-1.5b"
+base_url = "{base_url}"
+benchmarks = ["race"]
+output_dir = "results/no-cot"
+max_length = 16384
+max_num_seqs = 5
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "no_think"
+wkv_mode = "fp32io16"
+''',
+                encoding="utf-8",
+            )
+
+            cfg = EvaluatorConfig.from_config(config)
+
+            assert cfg.model == backend
+            assert cfg.model_args["rwkv_generation_prompt"] == "no_think"
+            assert cfg.metadata["cot_mode"] == "no_think"
+
     def test_toml_config_rwkv7_remote_backend_with_tokenizer_name(self, tmp_path):
         from lm_eval.config.evaluate_config import EvaluatorConfig
 
@@ -1203,7 +1315,11 @@ wkv_mode = "fp32io16"
         )
 
         with pytest.raises(
-            ValueError, match="backend must be one of: rwkv7-http, rwkv7-remote"
+            ValueError,
+            match=(
+                "backend must be one of: rwkv7-http, rwkv7-lightning-cuda, "
+                "rwkv7-remote, rwkv7-remote-chat"
+            ),
         ):
             EvaluatorConfig.load_config(config)
 
@@ -1526,9 +1642,14 @@ wkv_mode = "fp32io16"
         )
 
         loaded = EvaluatorConfig.from_config(config)
-        loaded.process_tasks()
+        _task_manager, benchmark_map = loaded.process_tasks()
 
         assert loaded.tasks == ["race", "drop", "xquad"]
+        assert {name: spec.field for name, spec in benchmark_map.items()} == {
+            "race": "reasoning",
+            "drop": "reasoning",
+            "xquad": "reasoning",
+        }
 
     @pytest.mark.parametrize(
         "field",
@@ -1838,6 +1959,33 @@ class TestEvaluatorConfigCampaignModels:
         ]
         assert all(cfg["tasks"] == ["mutual"] for cfg in configs)
         assert all(cfg["metadata"]["cot_mode"] == "open_think" for cfg in configs)
+
+    def test_campaign_entries_carry_their_own_weight_revision(self, tmp_path):
+        from lm_eval.config.evaluate_config import EvaluatorConfig
+
+        campaign = _write_campaign(
+            tmp_path,
+            CAMPAIGN_TOML.replace(
+                'model_name = "rwkv7-g1k-1.5b"\n',
+                'model_name = "rwkv7-g1k-1.5b"\n'
+                'weight_revision = "rwkv7-g1k-1.5b-20260930-ctx25600"\n',
+            ).replace(
+                'model_name = "rwkv7-g1k-7.2b"\n',
+                'model_name = "rwkv7-g1k-7.2b"\n'
+                'weight_revision = "rwkv7-g1k-7.2b-20260930-ctx25600"\n',
+            ),
+        )
+
+        configs = EvaluatorConfig.load_configs(campaign)
+
+        assert [cfg["metadata"]["weight_revision"] for cfg in configs] == [
+            "rwkv7-g1k-1.5b-20260930-ctx25600",
+            "rwkv7-g1k-7.2b-20260930-ctx25600",
+        ]
+        assert [cfg["model_args"]["model"] for cfg in configs] == [
+            "rwkv7-g1k-1.5b",
+            "rwkv7-g1k-7.2b",
+        ]
 
     def test_model_overrides_beat_every_entry(self, tmp_path):
         """Launch-time overlays own the campaign-wide knobs."""

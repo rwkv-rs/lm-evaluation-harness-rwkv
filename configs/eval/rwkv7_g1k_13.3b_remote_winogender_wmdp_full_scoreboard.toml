@@ -1,0 +1,49 @@
+# RWKV7-G1K-13.3B Winogender and WMDP evaluation.
+# api.rwkv.rs serves rwkv7-g1k-13.3b from the rwkv7-g1k-13.3b-20260930-ctx25600
+# weight revision. The output path records the exact served revision.
+schema_version = 1
+backend = "rwkv7-remote"
+
+model_name = "rwkv7-g1k-13.3b"
+base_url = "https://vllm.rwkvos.com/v1/completions"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/13.3b"
+trust_remote_code = true
+benchmarks = ["winogender", "wmdp"]
+include_path = ["configs/eval/offline_six_tasks"]
+output_dir = "results/rwkv7-g1k-13.3b-20260930-ctx25600-remote-winogender-wmdp-openthink-full"
+
+max_length = 8192
+max_num_seqs = 500
+# Client-side HTTP robustness knobs. Requests queue several minutes behind the
+# remote service's batch scheduler at this concurrency, so the upstream 300s
+# client timeout (max_retries=3) aborts them mid-flight. These are operational
+# knobs: lm_eval/_cli/run.py keeps them out of the checkpoint fingerprint, so
+# an existing checkpointed run stays resumable.
+timeout = 1800
+max_retries = 6
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "Winogender and WMDP recovery run with official RWKV7-G1K-13.3B 20260930 revision"
+
+[publication.tasks.winogender]
+field = "reasoning"
+
+[publication.tasks.wmdp]
+field = "knowledge"

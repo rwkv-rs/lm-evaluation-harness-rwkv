@@ -2,7 +2,7 @@
 .DS_Store
 
 # Virtual environments
-.venv/
+.venv
 venv/
 ENV/
 env/
@@ -27,6 +27,7 @@ ipython_config.py
 
 # Output and data
 output/
+results/
 data/
 temp/
 test_logs/
@@ -46,5 +47,11 @@ examples/wandb/
 # PyInstaller
 *.spec
 
-#uv
+# uv
 uv.lock
+
+# Local secrets (API keys, tokens) -- never commit these
+.secrets/
+*.secrets
+*_api_key
+*_api_key.*

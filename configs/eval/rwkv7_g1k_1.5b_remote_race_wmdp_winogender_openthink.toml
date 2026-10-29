@@ -1,0 +1,54 @@
+# RWKV7-g1j-1.5B remote run over race + wmdp + winogender (all multiple_choice,
+# scored via rwkv7-remote's avg@k generative letter-parsing path -- see
+# lm_eval/models/rwkv_choice.py -- rather than echo/logprobs), capped at
+# --limit 50, high concurrency against the hosted api.rwkv.rs service.
+# Uses the official chat template (apply_chat_template=true) and open_think
+# CoT sampling (temp 0.96/top_p 0.76/top_k 32/presence_penalty 1.0/
+# frequency_penalty 0.1/penalty_decay 0.988, fixed by rwkv7-remote's
+# SAMPLING_PARAMETERS["open_think"]) instead of fake_think.
+schema_version = 1
+backend = "rwkv7-remote"
+
+model_name = "rwkv7-g1k-1.5b"
+base_url = "https://api.rwkv.rs/v1/completions"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/1.5b"
+trust_remote_code = true
+benchmarks = [
+  "race",
+  "wmdp",
+  "winogender",
+]
+output_dir = "results/rwkv7-g1k-1.5b-remote-race-wmdp-winogender-openthink-limit50"
+
+max_length = 16384
+max_num_seqs = 100
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = true
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+# model_sha256 = "c43176881caf85fe22ad654ab02e7519260d560f3d20420ab590adb0c823860f"
+
+[publication.tasks.race]
+field = "reasoning"
+
+[publication.tasks.wmdp]
+field = "knowledge"
+
+[publication.tasks.winogender]
+field = "reasoning"
+

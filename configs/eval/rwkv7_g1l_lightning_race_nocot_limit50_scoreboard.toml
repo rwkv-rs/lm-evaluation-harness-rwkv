@@ -1,0 +1,83 @@
+# RWKV7-G1L RACE smoke campaign over the four rwkv-lightning-cuda services.
+#
+# Required environment variables:
+#   CF_ACCESS_CLIENT_ID
+#   CF_ACCESS_CLIENT_SECRET
+#   SCOREBOARD_PUBLICATION_TOKEN
+#
+# The four served IDs observed from /v1/models on 2026-10-28 are:
+#   rwkv-g1l-1b-temp-6331
+#   rwkv-g1l-3b-temp-5764
+#   rwkv-g1l-7b-temp-3797
+#   rwkv-g1l-13b-temp-5497.w8a16
+# The canonical model names below preserve the repository/scoreboard size
+# taxonomy already used by the existing G1L campaign configs.
+schema_version = 1
+backend = "rwkv7-lightning-cuda"
+
+benchmarks = ["race"]
+limit = 50
+max_length = 32768
+max_gen_toks = 256
+batch_size = 16
+request_concurrency = 30
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "no_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+[model_overrides]
+timeout = 1800
+max_retries = 3
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "NoCoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "RWKV7-G1L four-model RACE NoCoT smoke evaluation, limit 50, rwkv-lightning-cuda native batch, fp32io16, ctx32768"
+
+[publication.tasks.race]
+field = "reasoning"
+avg_k = 1
+
+[[models]]
+model_name = "rwkv7-g1l-1.5b"
+weight_revision = "rwkv7-g1l-1.5b-temp6331-ctx32768"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/1.5b"
+base_url = "https://api-1b5.rwkvos.com/v1/batch/completions"
+max_num_seqs = 528
+output_dir = "results/rwkv7-g1l-1.5b-temp6331-ctx32768-lightning-race-nocot-limit50"
+
+[[models]]
+model_name = "rwkv7-g1l-2.9b"
+weight_revision = "rwkv7-g1l-2.9b-temp5764-ctx32768"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/2.9b"
+base_url = "https://api-3b.rwkvos.com/v1/batch/completions"
+max_num_seqs = 399
+output_dir = "results/rwkv7-g1l-2.9b-temp5764-ctx32768-lightning-race-nocot-limit50"
+
+[[models]]
+model_name = "rwkv7-g1l-7.2b"
+weight_revision = "rwkv7-g1l-7.2b-temp3797-ctx32768"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/7.2b"
+base_url = "https://api-7b.rwkvos.com/v1/batch/completions"
+max_num_seqs = 169
+output_dir = "results/rwkv7-g1l-7.2b-temp3797-ctx32768-lightning-race-nocot-limit50"
+
+[[models]]
+model_name = "rwkv7-g1l-13.3b"
+weight_revision = "rwkv7-g1l-13.3b-temp5497-w8a16-ctx32768"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/13.3b"
+base_url = "https://api-13b.rwkvos.com/v1/batch/completions"
+max_num_seqs = 125
+output_dir = "results/rwkv7-g1l-13.3b-temp5497-w8a16-ctx32768-lightning-race-nocot-limit50"

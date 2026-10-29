@@ -172,7 +172,7 @@ The correct `think_end_token` for a given model can be found in its `tokenizer_c
 
 | Argument | Short | Description |
 |----------|-------|-------------|
-| `--config` | `-C` | Path to YAML configuration file. CLI arguments override config file values. See [Configuration Files](config_files.md). |
+| `--config` | `-C` | Path to a TOML or YAML configuration file. CLI arguments override config file values. See [Configuration Files](config_files.md). |
 
 ### HuggingFace Hub Logging
 

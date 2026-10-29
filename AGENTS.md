@@ -99,14 +99,10 @@ param_size: 参数规模, 仅有 0.1b, 0.4b, 1.5b(often used in RL), 2.9b, 7.2b(
 记录详细 (benchmark_name, model_name, n_samples, k_metrics, cot_mode, prompt_template), [_可选完成 wkv_mode fp32io16 vs fp16 对比] 对应的 (正确率, 截断率) , 其中截断率定义为达到输出上限未能完成作答的样本数 / 总样本数
 
 ## 分数上传
-等待 scoreboard-rwkv 仓库完成后会补充详细方法, 暂不执行相关工作.
+ scoreboard-rwkv 仓库承担，在配置了url和token之后，即可发布
 
 ## Env
 使用 uv 管理本机和远端专属环境 ./.venv, 严禁本项目使用其它环境, 严禁其它项目使用本项目环境, 避免环境污染问题。
 
-## Machine for Testing and Benchmarking
-```bash
-ssh rwkv-sha-pro6000x8
-cd ~/Projects/MachineLearning/lm-evaluation-harness-rwkv
-```
+
 use git to sync your changes instead of rsync.

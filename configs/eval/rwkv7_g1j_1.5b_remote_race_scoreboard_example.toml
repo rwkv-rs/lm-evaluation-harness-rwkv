@@ -1,0 +1,54 @@
+ # 起测评样例：跑一个最小 benchmark（race，standalone 的 multiple_choice，经
+# rwkv7-remote 的 avg@k 生成式选项解析路径打分，见
+# lm_eval/models/rwkv_choice.py），同时完整走一遍 Scoreboard 上传流程（见
+# lm_eval/loggers/scoreboard.py）。照着抄这份文件，改 model_name/benchmarks/
+# base_url 即可用于真实场景。
+#
+# 下面 [publication] 的 base_url 是本地占位地址，配合 dry_run = true，所以
+# `lm-eval run --config <this file>` 只会在本地构建并校验
+# (benchmark_info, score) 上传数据，不会真的调用 /api/health、
+# /api/add_benchmarks、/api/upload。看板真实地址见
+# ~/code/scoreboard-rwkv/README.md（test: https://eval.rwkv.rs/test/api，
+# production: https://eval.rwkv.rs/api），`field`/`framework` 的合法取值见
+# ~/code/scoreboard-rwkv/scoreboard-server/db/init.sql。要真的上传，把
+# dry_run 改成 false，base_url 换成上面两个真实地址之一，并提前 export
+# SCOREBOARD_PUBLICATION_TOKEN。
+schema_version = 1  # 本仓库的带版本配置 schema，目前只有 1 合法。
+backend = "rwkv7-remote"  # 可选：rwkv7-http / rwkv7-remote / rwkv7-remote-chat。"-remote" 走原始 /v1/completions 接口，"-remote-chat" 走 /v1/chat/completions，"-http" 由服务端完成分词。
+
+model_name = "rwkv7-g1j-1.5b"  # lm-eval-rwkv 的模型 id；编码了 arch_version-data_version-param_size，供 Scoreboard 解析（见 lm_eval/loggers/scoreboard.py 的 MODEL_NAME_PATTERN）。建议写完整权重文件名主干（如 "rwkv7-g1j-1.5b-20260831-ctx16384"）以便记录精确版本。
+base_url = "https://api.rwkv.rs/v1/completions"  # 上面 backend 对应的推理端地址；本次运行的全部请求都发往这个 endpoint。
+tokenizer_name = "/home/link/weight"  # 本地 HF tokenizer 目录；仅当 backend = "rwkv7-remote" 时允许（其它 backend 由服务端分词，不接受此字段）。
+trust_remote_code = true  # tokenizer_name 指向带自定义（非上游）代码的 tokenizer 时必须为 true；要求 tokenizer_name 已设置。
+benchmarks = [
+  "race",  # lm_eval/tasks/ 下注册的 task 或 group 名称。
+]
+output_dir = "results/rwkv7-g1j-1.5b-remote-race-scoreboard-example"  # results.json、samples、task_artifacts 的写入目录。
+
+limit = 20  # 每个 task 截取的样本数上限——只用于跑通配置/流程的冒烟测试；正式上报的分数绝不能带 limit。
+max_length = 16384  # 模型上下文长度（token 数）；也会原样记录进 Scoreboard benchmark_info 的 ctx_len 字段。
+max_num_seqs = 5  # 推理端自身的并发容量（服务端 --max-num-seqs 的取值）：评估端的请求并发预算直接取自该值，不再单独手工填写请求并发数。
+
+apply_chat_template = true  # 用模型的 chat template 包装 prompt，而不是发送裸文本。
+fewshot_as_multiturn = true  # 把 few-shot 样例渲染成独立的多轮对话，而不是拼进一条 user 消息；要求 apply_chat_template = true。
+log_samples = true  # 把每条样本的输入输出落盘；Scoreboard 上传要靠这些记录来构建 passed/wrong/failed 分桶，因此是必需项。
+
+[rwkv_profile]
+prompt_template = "assistant"  # 可选：assistant / bot / function_calling——对应官方三套 Prompt Template 之一（见 transformers-rwkv / rwkv7-g1-st）。
+generation_prompt = "fake_think"  # 可选：fake_think / open_think——决定 CoT 模式及其固定解码参数（按 AGENTS.md：open_think 为 temp 0.96/top_p 0.76/top_k 32/presence_penalty 1.0/frequency_penalty 0.1/penalty_decay 0.988；fake_think 为 temp 1.0/top_p 0.28/top_k 32）。
+wkv_mode = "fp32io16"  # 可选：fp16 / fp32io16——AGENTS.md 规定默认使用 fp32io16 作为正确性检查的基准模式。
+
+[checkpoint]
+enabled = true  # 把每条样本的结果持久化写入 output_dir/checkpoints/run.sqlite3，崩溃/被杀后（或用 `--resume`）可跳过已完成的部分，不必重新派发。
+
+[publication]
+enabled = true  # 打开 Scoreboard 上传回调（lm_eval/loggers/scoreboard.py）；不设或为 false 时整次运行只落在本地。
+dry_run = true  # 只构建并校验 (benchmark_info, score) 上传数据，不会真的调用 /api/health、/api/add_benchmarks、/api/upload。要真的上传改成 false。
+base_url = "http://127.0.0.1:8811"  # Scoreboard 服务根地址。真实地址：https://eval.rwkv.rs/test/api（test）或 https://eval.rwkv.rs/api（production）——见 ~/code/scoreboard-rwkv/README.md。
+cot_mode = "FakeCoT"  # 可选：NoCoT / FakeCoT / CoT——Scoreboard 侧对本次运行 CoT 模式的标签；需与上面 rwkv_profile.generation_prompt 保持一致。
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"  # 存放 bearer token 的环境变量名，会以 `Authorization: Bearer <token>` 发送；非 dry-run 上传前必须先 export 这个变量。
+
+[publication.tasks.race]
+field = "reasoning"  # 可选：knowledge / reasoning / maths / coding / instruction_following / agentic / vision——该 benchmark 在 Scoreboard 中归属的类别（对应 scoreboard-server/db/init.sql 里 benchmarks.field 的约束）。
+# `avg_k` 不再手填：上传时由结果推导（completions / samples，多 leaf 按 completion 加权，
+# 可为小数）。确实要钉住某个值时再显式写上，推导值与它不一致会直接报错，而不是照发。

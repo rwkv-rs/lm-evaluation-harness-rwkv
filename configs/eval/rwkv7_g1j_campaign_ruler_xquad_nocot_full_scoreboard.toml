@@ -1,0 +1,97 @@
+# RWKV7-G1J NoCoT (no_think) full campaign for the two long-context /
+# multilingual benchmarks that were not part of the four-benchmark campaign:
+#
+#   ruler  -- all 13 synthetic long-context leaves, 500 docs each at the
+#             harness default 4096-token context (6500 docs total)
+#   xquad  -- all 12 XQuAD language leaves (the `xquad` tag), full
+#             validation split
+#
+# No `limit`: every document is evaluated. The evaluator's avg@k mode is
+# live (lm_eval/api/benchmark.py plan_avg_at_k); with both benchmarks above
+# the 6000-rollout ceiling, the budget resolves to k=1 per doc, i.e. a
+# full-coverage avg@1 pass -- exactly the same rollout accounting the board
+# already uses for the other full campaigns.
+#
+# max_length = 16384 matches the served weight release's ctx16384 window.
+# RULER's longest generated prompt here is 4096 tokens plus a 128-token
+# answer budget, and XQuAD contexts are far shorter, so nothing is truncated.
+#
+# tokenizer_name is required: RULER synthesizes its haystacks with the model
+# tokenizer, and both benchmarks render prompts through the official RWKV
+# chat template. RULER keeps its default 4096-token context (the harness
+# default), which is what the existing scoreboard cells for this ladder
+# measure.
+schema_version = 1
+backend = "rwkv7-remote"
+
+base_url = "https://vllm.rwkvos.com/v1/completions"
+benchmarks = ["ruler", "xquad"]
+max_length = 16384
+trust_remote_code = true
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "no_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+# timeout/max_retries are scheduling knobs excluded from the checkpoint
+# fingerprint (lm_eval/api/checkpoint.OPERATIONAL_MODEL_ARGS), so changing
+# them after an interruption only redispatches unfinished requests. Five
+# minutes is well above a 128-token no_think answer; the earlier 30-minute
+# value let a handful of stalled tail requests freeze a whole task.
+[model_overrides]
+timeout = 300
+max_retries = 6
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "NoCoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "full RWKV7-G1J RULER+xQuad NoCoT campaign, all documents, avg@k mode, ctx 16384, deterministic no_think decoding"
+
+[publication.tasks.ruler]
+field = "reasoning"
+
+[publication.tasks.xquad]
+field = "reasoning"
+
+# Request budget per size. vllm.rwkvos.com serves the four G1J aliases from
+# one endpoint and was measured to take ~800 concurrent requests cleanly;
+# four concurrent child processes at 200 each keep it saturated without
+# tipping it into connection refusals.
+[[models]]
+model_name = "rwkv7-g1j-1.5b"
+weight_revision = "rwkv7-g1j-1.5b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/1.5b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-1.5b-remote-ruler-xquad-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-2.9b"
+weight_revision = "rwkv7-g1j-2.9b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/2.9b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-2.9b-remote-ruler-xquad-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-7.2b"
+weight_revision = "rwkv7-g1j-7.2b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/7.2b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-7.2b-remote-ruler-xquad-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-13.3b"
+weight_revision = "rwkv7-g1j-13.3b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/13.3b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-13.3b-remote-ruler-xquad-nocot-full"

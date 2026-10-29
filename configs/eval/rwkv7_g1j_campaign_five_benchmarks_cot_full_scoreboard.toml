@@ -1,0 +1,79 @@
+# RWKV7-G1J full CoT campaign for the five unique benchmarks requested:
+# wmdp, winogender, race, mutual, and mc_taco. `mutual` was listed twice in
+# the request; duplicate benchmark entries are intentionally collapsed here so
+# the same task is not evaluated or published twice.
+schema_version = 1
+backend = "rwkv7-remote"
+
+base_url = "https://vllm.rwkvos.com/v1/completions"
+benchmarks = ["wmdp", "winogender", "race", "mutual", "mc_taco"]
+include_path = ["configs/eval/offline_six_tasks"]
+max_length = 16384
+trust_remote_code = true
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+timeout = 1800
+max_retries = 6
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "full RWKV7-G1J five-benchmark avg@k CoT campaign, fp32io16, vllm.rwkvos.com"
+
+[publication.tasks.wmdp]
+field = "knowledge"
+
+[publication.tasks.winogender]
+field = "reasoning"
+
+[publication.tasks.race]
+field = "reasoning"
+
+[publication.tasks.mutual]
+field = "reasoning"
+
+[publication.tasks.mc_taco]
+field = "reasoning"
+
+# vllm.rwkvos.com was measured to serve roughly 800 in-flight requests cleanly;
+# four simultaneous model children at 200 requests each keep the endpoint busy.
+[[models]]
+model_name = "rwkv7-g1j-1.5b"
+weight_revision = "rwkv7-g1j-1.5b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/1.5b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-1.5b-remote-five-benchmarks-cot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-2.9b"
+weight_revision = "rwkv7-g1j-2.9b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/2.9b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-2.9b-remote-five-benchmarks-cot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-7.2b"
+weight_revision = "rwkv7-g1j-7.2b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/7.2b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-7.2b-remote-five-benchmarks-cot-full"
+
+[[models]]
+model_name = "rwkv7-g1j-13.3b"
+weight_revision = "rwkv7-g1j-13.3b-20260831-ctx16384"
+tokenizer_name = "/home/link/weight/rwkv-g1j-tokenizer/13.3b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1j-13.3b-remote-five-benchmarks-cot-full"

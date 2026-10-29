@@ -1,0 +1,114 @@
+# RWKV7-G1K NoCoT (no_think) full-coverage campaign over the four adapted
+# benchmark families that previously only had limit-50 passes on this ladder:
+#
+#   babilong, cruxeval, inverse_scaling_prize, model_written_evals
+#
+# One campaign TOML covers the whole weight ladder: vllm.rwkvos.com serves
+# rwkv7-g1k-<size> from the rwkv7-g1k-<size>-20260930-ctx25600 revisions, so
+# each [[models]] entry only carries what differs per size (served model name,
+# official tokenizer assets, result directory). `lm-eval run -C` starts one
+# child process per size, and all four run concurrently so the endpoint's
+# whole request budget is in flight (see RWKV_EVALUATION_GUIDE.md 6.1).
+#
+# No `limit`: the evaluator's avg@k mode is live (lm_eval/api/benchmark.py
+# plan_avg_at_k), spending each benchmark's rollout budget on k samples per
+# document. cruxeval is the one exception -- it declares its own repeats=10
+# pass@k scoring, which the avg@k override deliberately never clobbers.
+# Full document counts and planned rollouts per size:
+#
+#   babilong               19986 docs,  20 leaves -> k=1,  19986 rollouts
+#   cruxeval                4800 docs,   6 leaves, repeats=10 -> 48000
+#   inverse_scaling_prize  29136 docs,  10 leaves -> k=1,  29136 rollouts
+#   model_written_evals   187931 docs, 187 leaves -> k=1, 187931 rollouts
+#
+# max_length = 25600 is the served context. no_think decodes deterministically
+# and the avg@k multiple_choice path reserves only 256 completion tokens for it
+# (MAX_NEW_TOKENS=8192 is the open_think budget), so every request in this
+# campaign fits well inside the window and the cot_mode records "NoCoT".
+#
+# tokenizer_name is required here: cruxeval/isp/mwe prompts are rendered with
+# the official chat template, and multiple_choice scoring (`isp`,
+# `model_written_evals`) goes through the avg@k generative letter path. The
+# three files in each directory are the official rwkv7-g1k tokenizer assets
+# (tokenizer.json/config + chat_template.jinja).
+schema_version = 1
+backend = "rwkv7-remote"
+
+base_url = "https://vllm.rwkvos.com/v1/completions"
+benchmarks = [
+  "babilong",
+  "cruxeval",
+  "inverse_scaling_prize",
+  "model_written_evals",
+]
+max_length = 25600
+trust_remote_code = true
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "no_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+# timeout/max_retries: open_think generations queue behind the remote batch
+# scheduler, so the 300s default client timeout aborts long rollouts
+# mid-flight. Both are scheduling knobs excluded from the checkpoint
+# fingerprint (lm_eval/api/checkpoint.OPERATIONAL_MODEL_ARGS), so raising them
+# after an interruption only redispatchs unfinished requests.
+[model_overrides]
+timeout = 1800
+max_retries = 6
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "NoCoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "RWKV7-G1K four-benchmark NoCoT full campaign (babilong/cruxeval/inverse_scaling_prize/model_written_evals), no limit, avg@k live, ctx 25600, deterministic no_think decoding"
+
+[publication.tasks.babilong]
+field = "reasoning"
+
+[publication.tasks.cruxeval]
+field = "coding"
+
+[publication.tasks.inverse_scaling_prize]
+field = "reasoning"
+
+[publication.tasks.model_written_evals]
+field = "reasoning"
+
+# Request budget per size. vllm.rwkvos.com serves ~800 in-flight requests
+# cleanly (~8.6k tok/s aggregate with the whole ladder running) and starts
+# refusing connections near 2000, so four concurrent child processes at 200
+# each keep the endpoint saturated without tripping it.
+[[models]]
+model_name = "rwkv7-g1k-1.5b"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/1.5b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1k-1.5b-20260930-ctx25600-remote-four-benchmarks-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1k-2.9b"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/2.9b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1k-2.9b-20260930-ctx25600-remote-four-benchmarks-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1k-7.2b"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/7.2b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1k-7.2b-20260930-ctx25600-remote-four-benchmarks-nocot-full"
+
+[[models]]
+model_name = "rwkv7-g1k-13.3b"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/13.3b"
+max_num_seqs = 200
+output_dir = "results/rwkv7-g1k-13.3b-20260930-ctx25600-remote-four-benchmarks-nocot-full"

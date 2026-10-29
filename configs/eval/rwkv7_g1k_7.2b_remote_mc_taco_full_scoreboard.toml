@@ -1,0 +1,39 @@
+# RWKV7-G1K-7.2B mc_taco-only campaign.
+# api.rwkv.rs serves rwkv7-g1k-7.2b from the rwkv7-g1k-7.2b-20260930-ctx25600
+# weight revision. The local task override supplies the corrected mc_taco prompt.
+schema_version = 1
+backend = "rwkv7-remote"
+
+model_name = "rwkv7-g1k-7.2b"
+base_url = "https://vllm.rwkvos.com/v1/completions"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/7.2b"
+trust_remote_code = true
+benchmarks = ["mc_taco"]
+include_path = ["configs/eval/offline_six_tasks"]
+output_dir = "results/rwkv7-g1k-7.2b-20260930-ctx25600-remote-mc-taco-full"
+
+max_length = 25600
+max_num_seqs = 100
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "corrected mc_taco prompt, RWKV7-G1K-7.2B 20260930 revision"
+
+[publication.tasks.mc_taco]
+field = "reasoning"

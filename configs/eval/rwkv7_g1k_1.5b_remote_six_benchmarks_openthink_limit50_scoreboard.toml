@@ -1,0 +1,54 @@
+# RWKV7-G1K-1.5B remote evaluation.
+# api.rwkv.rs currently serves rwkv7-g1k-1.5b-20260930-ctx25600 under this ID.
+schema_version = 1
+backend = "rwkv7-remote"
+
+model_name = "rwkv7-g1k-1.5b"
+base_url = "https://api.rwkv.rs/v1/completions"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/1.5b"
+trust_remote_code = true
+benchmarks = ["discrim_eval", "mc_taco", "mutual", "race", "winogender", "wmdp"]
+include_path = ["configs/eval/offline_six_tasks"]
+output_dir = "results/rwkv7-g1k-1.5b-20260930-ctx25600-remote-six-benchmarks-openthink-limit50"
+
+limit = 50
+max_length = 25600
+max_num_seqs = 100
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = true
+
+[publication]
+enabled = true
+base_url = "https://eval.rwkv.rs"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "RWKV7-G1K six-benchmark evaluation, limit 50, official Open Think sampling"
+
+[publication.tasks.discrim_eval]
+field = "reasoning"
+
+[publication.tasks.mc_taco]
+field = "reasoning"
+
+[publication.tasks.mutual]
+field = "reasoning"
+
+[publication.tasks.race]
+field = "reasoning"
+
+[publication.tasks.winogender]
+field = "reasoning"
+
+[publication.tasks.wmdp]
+field = "knowledge"

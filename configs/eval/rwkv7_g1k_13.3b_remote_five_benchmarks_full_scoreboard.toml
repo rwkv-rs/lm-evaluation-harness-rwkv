@@ -1,0 +1,52 @@
+# Full RWKV7-G1K-13.3B campaign.
+# api.rwkv.rs serves rwkv7-g1k-13.3b from the rwkv7-g1k-13.3b-20260930-ctx25600
+# weight revision. The short model_name is the API model id; the output path
+# records the exact served revision for reproducibility.
+schema_version = 1
+backend = "rwkv7-remote"
+
+model_name = "rwkv7-g1k-13.3b"
+base_url = "https://api.rwkv.rs/v1/completions"
+tokenizer_name = "/home/link/weight/rwkv-g1k-tokenizer/13.3b"
+trust_remote_code = true
+benchmarks = ["mc_taco", "mutual", "race", "winogender", "wmdp"]
+include_path = ["configs/eval/offline_six_tasks"]
+output_dir = "results/rwkv7-g1k-13.3b-20260930-ctx25600-remote-five-benchmarks-openthink-full"
+
+max_length = 25600
+max_num_seqs = 20
+
+apply_chat_template = true
+fewshot_as_multiturn = true
+log_samples = true
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[checkpoint]
+enabled = true
+fresh = false
+
+[publication]
+enabled = true
+base_url = "http://127.0.0.1:7862"
+cot_mode = "CoT"
+token_env = "SCOREBOARD_PUBLICATION_TOKEN"
+rerun_reason = "full five-benchmark avg@k campaign with official RWKV7-G1K-13.3B 20260930 revision"
+
+[publication.tasks.mc_taco]
+field = "reasoning"
+
+[publication.tasks.mutual]
+field = "reasoning"
+
+[publication.tasks.race]
+field = "reasoning"
+
+[publication.tasks.winogender]
+field = "reasoning"
+
+[publication.tasks.wmdp]
+field = "knowledge"
