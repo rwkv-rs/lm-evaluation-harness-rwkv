@@ -1,25 +1,31 @@
 task: mutual
-dataset_path: "EleutherAI/mutual"
-dataset_name: mutual
-output_type: multiple_choice
+dataset_path: parquet
+dataset_name: null
+dataset_kwargs:
+  data_files:
+    train: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual/train/0000.parquet
+    validation: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual/validation/0000.parquet
+    test: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual/test/0000.parquet
+output_type: generate_until
 training_split: train
 validation_split: validation
-doc_to_text: "{{article}}"
-doc_to_target: "{{['A', 'B', 'C', 'D'].index(answers)}}"
-doc_to_choice: "{{options}}"
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{answers}}"
 process_docs: !function utils.process_docs
+generation_kwargs:
+  until: []
+  max_gen_toks: 8192
+filter_list:
+  - name: "albatross_mcq"
+    filter:
+      - function: "albatross_mcq"
+        choice_labels: "ABCD"
 process_results: !function utils.process_results
 should_decontaminate: true
 doc_to_decontamination_query: "{{article}}"
 metric_list:
-  - metric: r@1
-    aggregation: mean
-    higher_is_better: true
-  - metric: r@2
-    aggregation: mean
-    higher_is_better: true
-  - metric: mrr
+  - metric: acc
     aggregation: mean
     higher_is_better: true
 metadata:
-  version: 2.0
+  version: 3.0

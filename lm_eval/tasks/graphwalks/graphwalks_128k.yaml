@@ -2,6 +2,7 @@ task: graphwalks_128k
 custom_dataset: !function utils.load_dataset
 dataset_kwargs:
   data_file: graphwalks_128k_and_shorter.parquet
+  revision: f338bb265735a56a79f4b0f5def722c9c3268ead
 output_type: generate_until
 test_split: train
 doc_to_text: "{{prompt}}"

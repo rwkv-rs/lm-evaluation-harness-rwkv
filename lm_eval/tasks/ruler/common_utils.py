@@ -1,8 +1,10 @@
 import logging
 import re
 from functools import cache
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Union
 
+import requests
 from transformers import AutoTokenizer
 
 
@@ -17,10 +19,55 @@ DEFAULT_SEQ_LENGTHS = [
 ]
 
 
+class RemoteRulerTokenizer:
+    def __init__(self, base_url: str, model: str, timeout: float = 30):
+        self.base_url = base_url.removesuffix("/v1/completions").rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.session = requests.Session()
+
+    def encode(self, text: str) -> list[int]:
+        response = self.session.post(
+            f"{self.base_url}/tokenize",
+            json={
+                "model": self.model,
+                "prompt": text,
+                "add_special_tokens": False,
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        tokens = response.json().get("tokens")
+        if not isinstance(tokens, list) or not all(
+            isinstance(token, int) for token in tokens
+        ):
+            raise RuntimeError("Malformed response from remote /tokenize endpoint.")
+        return tokens[1:] if tokens and tokens[0] == 0 else tokens
+
+    def __call__(self, text: str, **kwargs):
+        return SimpleNamespace(input_ids=self.encode(text))
+
+
 @cache
 def get_tokenizer(
-    tokenizer=None, pretrained=None, **kwargs
-) -> Union["transformers.PreTrainedTokenizer", "transformers.PreTrainedTokenizerFast"]:
+    tokenizer=None,
+    pretrained=None,
+    tokenizer_base_url=None,
+    tokenizer_model=None,
+    model=None,
+    **kwargs,
+) -> Union[
+    RemoteRulerTokenizer,
+    "transformers.PreTrainedTokenizer",
+    "transformers.PreTrainedTokenizerFast",
+]:
+    if tokenizer_base_url:
+        remote_model = tokenizer_model or model
+        assert remote_model, "No model provided for the remote tokenizer."
+        eval_logger.info(
+            "Using remote tokenizer %s for synthetic tasks.", tokenizer_base_url
+        )
+        return RemoteRulerTokenizer(tokenizer_base_url, remote_model)
     pretrained = tokenizer or pretrained
     assert pretrained, "No tokenizer or pretrained provided."
     eval_logger.info(f"Using tokenizer {pretrained} for synthetic tasks.")

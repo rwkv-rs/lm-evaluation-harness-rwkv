@@ -202,8 +202,7 @@ def generate_samples(
     return write_jsons
 
 
-def get_dataset(pretrained, docs, qas, max_seq_length=None, **kwargs) -> list[dict]:
-    tokenizer = get_tokenizer(pretrained)
+def get_dataset(tokenizer, docs, qas, max_seq_length=None, **kwargs) -> list[dict]:
     write_jsons = generate_samples(
         tokenizer=tokenizer,
         docs=docs,
@@ -216,14 +215,15 @@ def get_dataset(pretrained, docs, qas, max_seq_length=None, **kwargs) -> list[di
 
 
 def get_qa_dataset(ds, **kwargs) -> dict[str, datasets.Dataset]:
-    pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
+    seq_lengths = kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+    tokenizer = get_tokenizer(**kwargs)
     if ds == "squad":
         qas, docs = read_squad()
     else:
         qas, docs = read_hotpotqa()
     df = (
-        get_dataset(pretrained=pretrained, docs=docs, qas=qas, max_seq_length=seq)
-        for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+        get_dataset(tokenizer=tokenizer, docs=docs, qas=qas, max_seq_length=seq)
+        for seq in seq_lengths
     )
 
     return {
