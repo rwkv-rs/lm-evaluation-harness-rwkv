@@ -95,6 +95,23 @@ pip install "lm_eval[hf,vllm,api]"
 
 A detailed table of all optional extras is available at the end of this document.
 
+## RWKV local coding evaluation
+
+Use `lm-eval coding` for RWKV-specific HTTP code generation and local Python
+functional tests. It supports local HumanEval/MBPP-shaped JSONL suites,
+independent repeats, native RWKV thinking modes, SQLite resume, and offline
+replay. Tests run in restricted Docker containers; raw completions, extracted
+code, control verdicts, and pass@k/avg@k metrics are saved locally.
+
+```bash
+uv run --no-sync python -m lm_eval coding -C configs/eval/rwkv7_coding_local.toml
+```
+
+Set the served weight, tokenizer, endpoint, and local problem-file path in the
+[example config](configs/eval/rwkv7_coding_local.toml) first. See the
+[RWKV evaluation guide](RWKV_EVALUATION_GUIDE.md#13-rwkv-本地-coding-测评) for
+the problem schema, container prerequisites, generation-only runs, and replay.
+
 ## Basic Usage
 
 ### Documentation

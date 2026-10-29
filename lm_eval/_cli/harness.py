@@ -2,6 +2,7 @@ import argparse
 import sys
 import textwrap
 
+from lm_eval._cli.coding import Coding
 from lm_eval._cli.ls import List
 from lm_eval._cli.publish import Publish
 from lm_eval._cli.run import Run
@@ -26,6 +27,9 @@ class HarnessCLI:
                   # Validate task configurations
                   lm-eval validate --tasks hellaswag,arc_easy
 
+                  # RWKV HTTP generation and local coding tests
+                  lm-eval coding --config configs/eval/rwkv7_coding_local.toml
+
                 legacy compatibility:
                   The harness maintains backward compatibility with the original interface.
                   If no command is specified, 'run' is automatically inserted:
@@ -44,6 +48,7 @@ class HarnessCLI:
         List.create(self._subparsers)
         Validate.create(self._subparsers)
         Publish.create(self._subparsers)
+        Coding.create(self._subparsers)
 
     def parse_args(self) -> argparse.Namespace:
         """Parse arguments using the main parser."""
