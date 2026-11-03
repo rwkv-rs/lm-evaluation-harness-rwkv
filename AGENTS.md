@@ -1,112 +1,132 @@
-## 核心目标
-lm-eval-harness 是 LLM 社区的标准评估库, 很早成为最主流的评估框架, 本仓库需要按照社区主流做法完成 RWKV 模型的接入.
-本仓库只需要用于完成 lighteval 和 evalscope **未能收录** 的 benchmark 的评估.
+## Core Objectives
+lm-evaluation-harness is a standard evaluation library in the LLM community. This repository needs to integrate RWKV models through lm-eval's native pipeline, model adapter, and task interfaces.
+This repository only evaluates benchmarks **not covered** by LightEval and EvalScope. Before adding a benchmark to the RWKV production configuration, check both frameworks' current runnable task registries.
+Code principle: For every file/type/function/variable, a similar implementation must be found as a prototype. If that prototype carries a model name, replace it with `RWKV` or another case variant; otherwise keep the same name. Using branch statements without affecting existing functionality.
+Non-Interference Principle: The changes we introduce should not break lm-eval's native evaluation pipeline, and should not affect the evaluation results of other models.
 
-## 目录规范
+## Evaluation Producer Contract
+
+- Obtain explicit user approval before any change that can affect scores, including scoring rules, extraction/grading fixes, expected-score handling, aggregation, prompt/mode, stop behavior or token budgets. An explicit user request for that specific change is approval; never treat a cleanup/refactor as approval for a scoring change. Any approved RWKV missing-choice expectation or missing-rollout formula belongs only in private RWKV graders; fractional credit does not turn a failed extraction into a passed detail.
+- Evaluation mode is executable behavior, not a label: every multiple-choice NoCoT task must use native `LOGPROBS`/loglikelihood scoring through `/v1/completions`, never generative exact-match merely tagged `NoCoT`. The lm-eval task must have native multiple-choice wiring (`output_type: multiple_choice`, `doc_to_text`, `doc_to_choice`, `doc_to_target`, `Instance(request_type="loglikelihood")`, and `process_results()`); `max_gen_toks` or a metadata field does not select the request type. Native generative tasks use `generate_until`.
+- Benchmark-native task configuration is authoritative. Automatic mode selection may choose NoCoT, FakeCoT, or CoT, but must be verified against actual pipeline logs (`LOGPROBS` versus `GENERATIVE`) before publishing results. A mode mismatch invalidates the score even when its uploaded label looks correct.
+- NoCoT details must represent the actual completion input without a CoT prompt. CoT/FakeCoT details must use the actual dispatched prompt after the configured RWKV template is applied: capture the client-rendered prompt and dispatched token IDs for completions, or the server-rendered prompt for chat completions. Never manually append choices, duplicate `Answer:`, expose an internal candidate-request JSON envelope as the user message, or reconstruct a different prompt for display. A generated response without a captured actual dispatched prompt is invalid for publication rather than silently uploading the raw message list.
+- CoT/FakeCoT generation must not inherit a single-answer newline stop sequence from the native task. Newline is valid for one-token completion tasks but truncates a reasoning trace before its final answer; thinking-mode requests must let the model finish by its own stop/EOS protocol. Before metric computation, RWKV generation must remove the reasoning wrapper and any assistant-message wrapper; an unterminated `<think>` trace is failed/truncated, never an answer. In-scope math tasks must additionally use an Albatross-style concise math answer extractor (balanced `\\boxed{...}` first, final mathematical expression fallback), and in-scope coding tasks must extract the final fenced program before details are uploaded. Scoreboard `answer` and `ground_truth` details must contain these concise values, not the full assistant message or full worked solution.
+- An answer extraction failure remains `None` internally for grading, but its uploaded `answer` must be the string `"-"`, never JSON null or `"None"`. Preserve the raw assistant response and failure classification; the display placeholder must not become a valid answer or change the score.
+- The RWKV mathematical verifier has one five-second wall deadline for parsing and equivalence verification. If verification cannot finish, fall back to complete stripped extracted gold/prediction string equality; differing strings score zero, never substring matching. Bound symbolic computation in a terminable, memory-limited worker so a caller thread cannot disable the deadline or a huge integer expansion exhaust the host. Preserve extraction, aggregation, prompts, generation budgets and all non-RWKV behavior.
+- Multiple-token choices are scored by summing the conditional logprob of every candidate token; this is sequence loglikelihood, not PPL. Single-token multiple-choice tasks may use the same native path until the server exposes reliable specified-token prompt logprobs. Every in-scope multiple-choice benchmark classified as NoCoT must configure lm-eval's native `multiple_choice`/`loglikelihood` path; its prompt must contain only the question and choices, without reasoning instructions or a trailing generated-answer wrapper. Every RWKV NoCoT+LOGPROBS prompt must end at a newline-delimited `\nAnswer:` cue. Preserve an existing cue and its whitespace; if missing, append `\nAnswer: ` in the private RWKV formatter, without changing choices, golds or metrics. Only generative prompts remove the trailing `Answer:`.
+- Configure generated-token budgets explicitly per model and task: normal generation requests up to 4096 tokens and high-difficulty math/reasoning requests up to 24576 generated tokens. Budgets such as 4096/8192/16384/24576 are completion lengths, not total context lengths; send them unchanged without subtracting prompt tokens. The inference backend has a separately configured, sufficiently large context; do not infer its total context limit from a generation budget or require a tokenization preflight. Record model, actual requested generation budget, declared context metadata, prompt template, request type, and truncation rate with every result; do not present manifest/weight context metadata as a measured server context limit. A completion reaching the output limit without a completed answer is truncation, not a valid answer.
+- Keep producer source, configuration, entrypoint, and live lifecycle aligned. Before a rerun, inspect PID argv, cgroup, and unit; stop only producer jobs confirmed to own affected results. Never stop inference, gateway, or unrelated evaluation jobs, and never run deleted legacy CLIs or configs.
+- For corrections, preserve existing rows and audit details; fetch a fresh production manifest, expire only exact affected score IDs with a temporary migration script, fetch tasks again, scope the rerun to affected model/benchmark pairs, and verify replacement IDs, modes, request types, budgets, and truncation rates after upload. Never truncate or clear the Scoreboard database for a correction and do not expire unrelated benchmarks.
+- Smoke validation must demonstrate actual `LOGPROBS` versus `GENERATIVE` requests on the required 1.5B and 2.9B samples. Production runs must stream completed rollouts, support interruption/resumption, and keep credentials root-only or environment-only (never in source, logs, or argv).
+- Responsibility boundaries remain strict: this repository owns the lm-eval producer pipeline, RWKV HTTP adapter, and Scoreboard publication; external systems own inference lifecycle, weights, wkv mode, and endpoint manifests. Evaluation-only transient units may reuse existing lifecycle operations for one-off runs, but must not become a permanent scheduler. Do not modify Scoreboard AGENTS or implementation from this repository.
+
+### Mandatory benchmark onboarding gate
+
+Before adding a benchmark, or changing an existing benchmark's prompt, solver, scorer, metric category, cot mode, answer format, extractor, or upload contract, read `docs/new_task_guide.md`, `docs/task_guide.md`, and `docs/model_guide.md` completely, and follow the benchmark onboarding workflow: verify scope and the official protocol, record an existing implementation prototype and the benchmark contract, implement through native TaskManager/Task/Instance/model/filter/metric interfaces, then validate before production onboarding. Read `docs/config_files.md` when changing configuration. Also read this file's `Evaluation Producer Contract`, `Correctness Checks`, and `End-to-End Testing` sections, then record the benchmark contract and prototype used for the implementation.
+
+A benchmark change is not reviewable until it demonstrates, at minimum:
+
+- the dataset fields, version and split, `doc_to_text`, `doc_to_choice`, `doc_to_target`, gold format, and expanded task/group/tag selectors;
+- the benchmark-native NoCoT/FakeCoT/CoT decision, actual `output_type`, `Instance.request_type`/`args`, sampling parameters, and repeats/k;
+- the real `/v1/completions` versus `/v1/chat/completions` request path, verified from logs;
+- prompt template, stop behavior, generated-token budget, answer extractor, extraction-failure value, and truncation semantics;
+- native metric/scorer wiring, exact completion input used in details, and consistent `answer`/`ground_truth`/`is_passed` behavior;
+- hermetic tests plus the required 1.5B and 2.9B ten-question smoke evaluation before publication;
+- actual populated result artifacts for the affected benchmarks (and test-database scores/details once publication is enabled), with the previously reported extraction, grading, prompt and mode anomalies absent. Starting a producer, passing unit tests, or querying an empty result set is not acceptance.
+
+Do not treat a `cot_mode` label, `max_gen_toks`, or a task name as evidence of executable evaluation behavior. Do not manually reconstruct NoCoT choices or rendered CoT prompts in the upload layer. If a required test file does not exist, obtain user confirmation before adding the new file. Code review must explicitly confirm this gate before a benchmark is added to the production configuration.
+
+## Directory Specification
 
 ```text
-.
-├── .github/
-│   └── workflows/                 # GitHub Actions 工作流
-├── .gitignore                     # Git 忽略规则
-├── .pre-commit-config.yaml        # pre-commit 检查配置
-├── docs/                          # lm-eval 使用、模型接入与任务开发文档
-│   └── img/                       # 文档图片
-├── examples/                      # Notebook 与独立调用示例
-├── lm_eval/                       # lm-evaluation-harness 主 Python 包
-│   ├── _cli/                      # `lm-eval` 命令行入口与子命令
-│   ├── api/                       # Model、Task、Instance、Metric 等核心接口
-│   ├── caching/                   # 请求缓存
-│   ├── config/                    # 评估与任务配置对象
-│   ├── decontamination/           # 数据去污染工具
-│   ├── filters/                   # 输出抽取、转换与选择过滤器
-│   ├── loggers/                   # 评估结果记录与外部日志集成
-│   ├── models/                    # Hugging Face、HTTP/API 等模型后端适配
-│   ├── prompts/                   # Prompt 辅助实现
-│   ├── tasks/                     # Benchmark 定义与注册
-│   │   ├── include/               # 可复用 YAML 片段
-│   │   ├── <benchmark>/           # 每个 benchmark 或 benchmark 组的独立目录
-│   │   ├── _factory.py            # Task 工厂
-│   │   ├── _index.py              # Task 索引
-│   │   ├── _yaml_loader.py        # YAML Task 加载器
-│   │   └── manager.py             # TaskManager 实现
-│   ├── __init__.py                # 包初始化与版本信息
-│   ├── __main__.py                # `python -m lm_eval` 入口
-│   ├── defaults.py                # 全局默认评估配置
-│   ├── evaluator.py               # 评估主流程
-│   ├── evaluator_utils.py         # 评估流程辅助函数
-│   ├── result_schema.py           # 结果数据结构
-│   └── utils.py                   # 通用工具函数
-├── scripts/                       # 构建 benchmark、回归比较与结果处理脚本
-│   └── clean_training_data/       # 训练数据清理脚本
-├── templates/
-│   └── new_yaml_task/             # 新建 YAML Task 的模板
-├── tests/                         # 单元测试与测试资源
-│   ├── models/                    # 模型后端测试
-│   ├── scripts/                   # scripts/ 对应测试
-│   ├── test_configs/              # 测试配置
-│   ├── testconfigs/               # 配置解析测试资源
-│   ├── testdata/                  # 测试数据
-│   ├── testyamls/                 # YAML Task 测试资源
-│   └── test_*.py                  # 核心 API、Task、Evaluator 等单元测试
-├── temp/                          # **启动脚本**
-│   └── run_<benchmark_name>_<model_name>.sh  # 启动脚本
-├── AGENTS.md                      # 本仓库 Agent 约束与项目规范
-├── CITATION.bib                   # 项目引用信息
-├── CODEOWNERS                     # 代码所有者配置
-├── LICENSE.md                     # 项目许可证
-├── MANIFEST.in                    # Python 源码包文件清单
-├── README.md                      # 项目说明
-├── ignore.txt                     # 数据去污染忽略项
-├── pile_statistics.json           # Pile 去污染统计数据
-└── pyproject.toml                 # 包元数据、依赖、工具与命令入口配置
+lm_eval/_cli/                   Native lm-eval CLI entry points and configuration handling
+lm_eval/api/                    LM, TemplateLM, Task, ConfigurableTask, Instance, and metric interfaces
+lm_eval/config/                 Evaluation and task configuration
+lm_eval/models/                 RWKV HTTP adapter alongside native model backends
+lm_eval/tasks/                  Native benchmark definitions; do not add tasks just because the target list is missing items
+lm_eval/filters/                Native response extraction and selection filters
+lm_eval/loggers/                Standard results/details output and publication integration
+lm_eval/evaluator.py            Native evaluation pipeline
+lm_eval/evaluator_utils.py      Evaluation helpers
+scripts/                        Benchmark construction, regression comparison, and result processing
+tests/                          Hermetic tests for models, tasks, configuration, and the evaluator
+docs/                           Native model, task, and evaluation documentation
+temp/                           Startup scripts and external deployment snapshots
+  run_<benchmark_name>_<model_name>.sh
 ```
 
-model_name 需要写清楚 Qwen(如 Qwen3.5-2B ) / RWKV7 (详情见 `RWKV7 权重` 一章节) 权重具体版本号.
-新增任何文件, 都需要得到用户确认.
+Changes within `lm_eval/`, lm-eval tasks, and input contracts must apply the Correspondence Principle; `temp/` is not within lm-eval's management scope and only stores deployment snapshots and operation entry points provided by external systems. It must not use lm-eval internal implementations as code prototypes.
 
-## 权威 RWKV7 实现
+model_name must clearly specify the exact weight version number for Qwen (e.g., Qwen3.5-2B) / RWKV7 (see the `RWKV7 Weights` section for details).
+Adding any new file requires user confirmation.
+
+## Authoritative RWKV7 Implementations
 (1) https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/rwkv_v7_numpy.py
 (2) https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/run_rwkv7_qwen35.py
-(3) https://github.com/BlinkDL/Albatross -- 权威底层推理引擎实现仓库 (cuda, for pro6000, 无调度, 无varlen)
-(4) https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp -- 权威预训练实现仓库 (cuda, for h100)
-(5) https://zhiyuan1i.github.io/posts/dplr-mathematics -- Diagonal Plus Low Rank(DPLR）的数学原理：显式转移矩阵的并行计算
-(6) https://github.com/rwkv-rs/transformers-rwkv/tree/rwkv -- 权威 RWKV Huggingface Transformers 适配仓库 (with rust tokenizer, x10 faster than python implementation)
+(3) https://github.com/BlinkDL/Albatross -- authoritative low-level inference engine implementation repository (CUDA, for PRO6000, no scheduling, no varlen)
+(4) https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp -- authoritative pretraining implementation repository (CUDA, for H100)
+(5) https://zhiyuan1i.github.io/posts/dplr-mathematics -- Mathematical principles of Diagonal Plus Low Rank (DPLR): parallel computation of explicit transition matrices
+(6) https://github.com/rwkv-rs/transformers-rwkv/tree/rwkv -- authoritative RWKV Huggingface Transformers adaptation repository (with rust tokenizer, x10 faster than python implementation)
 
-## RWKV7 权重
-权重一般命名规范: {arch_version}-{data_version}-{param_size}-{release_date}-{ctx_len}.pth
-如: rwkv7-g1h-7.2b-20260710-ctx10240.pth
-arch_version: 架构版本, 如 rwkv7(default), rwkv7a(experimental, rwkv7 with DeepEmbed), rwkv7b(experimental, rwkv7 with DeepEmbedAttn)
-data_version: 数据版本, 如 g1a, g1b... (The further back in the alphabet, the better)
-param_size: 参数规模, 仅有 0.1b, 0.4b, 1.5b(often used in RL), 2.9b, 7.2b(often used in the infer test), 13.3b
-(1) https://huggingface.co/BlinkDL/rwkv7-g1/tree/main -- 权威权重 Release 源 (update every month)
-(2) https://huggingface.co/BlinkDL/temp-latest-training-models/tree/main -- 权威权重 Test 源 (不定期update)
-(3) https://huggingface.co/rwkv-rs/rwkv7-g1-st -- 权威权重 Release 源 (for transformers)
+## RWKV7 Weights
+General weight naming convention: {arch_version}-{data_version}-{param_size}-{release_date}-{ctx_len}.pth
+Example: rwkv7-g1h-7.2b-20260710-ctx10240.pth
+arch_version: architecture version, such as rwkv7(default), rwkv7a(experimental, rwkv7 with DeepEmbed), rwkv7b(experimental, rwkv7 with DeepEmbedAttn)
+data_version: data version, such as g1a, g1b... (The further back in the alphabet, the better)
+param_size: parameter scale, only includes 0.1b, 0.4b, 1.5b (often used in RL), 2.9b, 7.2b (often used in inference tests), 13.3b
+(1) https://huggingface.co/BlinkDL/rwkv7-g1/tree/main -- authoritative weight Release source (updated every month)
+(2) https://huggingface.co/BlinkDL/temp-latest-training-models/tree/main -- authoritative weight Test source (updated irregularly)
+(3) https://huggingface.co/rwkv-rs/rwkv7-g1-st -- authoritative weight Release source (for transformers)
 
-## 正确性检查
-1. 是否能够正确应用 transformers-rwkv 以及对应 rwkv7-g1-st 权重仓库中提供的三组 Prompt Template
-2. 默认使用 wkv_mode=fp32io16
-3. 当使用 Open Think 模式时, 使用解码参数 temp 0.96, top_p 0.76, top_k 32, presence_penalty 1.0, frequency_penalty 0.1, penalty_decay 0.988; 使用 Fake Think 模式时, 使用解码参数 temperature 1.0, top_p 0.28, top_k 32
-4. 参考 https://github.com/BlinkDL/Albatross/blob/main/faster3a_2605/eval_gpqa_diamond.py 完成选择题的通用判分器实现
-5. 参考 https://github.com/BlinkDL/Albatross/blob/main/faster3a_2605/eval_math500.py 完成简答题的通用判分器实现
-6. 模型分数应当于 Qwen3.5 相似参数量模型有相似的得分
+## Correctness Checks
+1. Whether the three sets of Prompt Templates provided in the transformers-rwkv and corresponding rwkv7-g1-st weight repositories can be correctly applied
+2. Use wkv_mode=fp32io16 by default
+3. When using Open Think mode, use decoding parameters temp 0.96, top_p 0.76, top_k 32, presence_penalty 1.0, frequency_penalty 0.1, penalty_decay 0.988; when using Fake Think mode, use decoding parameters temperature 1.0, top_p 0.28, top_k 32; when using Open Think + Function Call mode, use decoding parameters temp 0.96, top_p 0.76, top_k 32, and disable penalty.
+4. Refer to https://github.com/BlinkDL/Albatross/blob/main/faster3a_2605/eval_gpqa_diamond.py to complete the implementation of a general grader for multiple-choice questions
+5. Refer to https://github.com/BlinkDL/Albatross/blob/main/faster3a_2605/eval_math500.py to complete the implementation of a general grader for short-answer questions
+6. Model scores should be similar to those of Qwen3.5 models with similar parameter counts
 
-## 吞吐量检查
-1. 显存余量应当小于总量的 10%, GPU 利用率应达到 97%, 如 transformers-rwkv 或 FlashRWKV2 存在性能问题, 请及时反馈给用户.
-2. 使用 Http 协议支持评估端与推理端的通信, 请求并发量应当略大于推理并发量(允许少量排队, 但禁止空载)
+## Throughput Checks
+1. VRAM headroom should be less than 10% of the total, and GPU utilization should reach 97%. If transformers-rwkv or FlashRWKV2 has performance issues, report to the user promptly.
+2. Use HTTP protocol to support communication between the evaluation side and the inference side. Request concurrency should be slightly greater than inference concurrency (a small amount of queuing is allowed, but idling is prohibited). Do not reduce producer concurrency to work around HTTP transport errors without explicit user approval; investigate the transport bottleneck while preserving the requested pool capacity. All four model pools must run concurrently in independent processes with independent benchmark queues and failure/resumption; never evaluate models serially or impose a cross-model benchmark barrier. Production transient units must restart each model pool independently. Verify actual running/waiting requests and token-throughput deltas for every pool; configured concurrency or a running producer alone is not evidence that inference is saturated.
+3. Refer to the evaluation methodology widely used by the community for this benchmark, and ensure that the appropriate interface is used (`/v1/completions`, `/v1/chat/completions`), along with the thinking intensity (NoCoT, FakeCoT, CoT) and prompt templates (`Question: ... Answer:; User: ... Assistant: <think; etc.`).
 
-## 结果保存
-记录详细 (benchmark_name, model_name, n_samples, k_metrics, cot_mode, prompt_template), [_可选完成 wkv_mode fp32io16 vs fp16 对比] 对应的 (正确率, 截断率) , 其中截断率定义为达到输出上限未能完成作答的样本数 / 总样本数
+## End-to-End Testing
+Each time a benchmark design is added or modified, testing must be completed.
+Use 1.5b + 2.9b models to run a ten-question sample of the benchmark. While publication is suspended, validate local result artifacts and details; once publication is enabled, upload to https://eval.rwkv.rs/test/dashboard.
+If the wait time is long, analyze whether the wait time is reasonable, especially focusing on: whether the dataset is repeatedly read, whether total inference throughput meets the target, whether the grader is asynchronous and concurrent (beware of RACE), whether individual evaluation results are streamed to disk, and whether score upload only streams and uploads the necessary parts.
+Need to analyze from the result details or dashboard the reasons for "wrong answers" and "failed to answer". If it is a capability issue caused by abnormal model output, ignore it; if the model completed the answer normally, but the answer extractor and grader had anomalies causing incorrect grading, then it needs to be fixed.
+Need to check from the result details or dashboard whether the model output for "correct answers" actually matches the standard answer. If it is actually different but the grader is too lenient, it also needs to be fixed.
 
-## 分数上传
-等待 scoreboard-rwkv 仓库完成后会补充详细方法, 暂不执行相关工作.
+## Interruption and Resumption
+Start evaluation tasks in a way that allows background execution and automatic restart.
+For evaluation restarts caused by requirement changes or bug fixes, prioritize creating a temporary migration script in /tmp to reuse existing results, rather than rerunning everything from scratch.
+Completed rollouts are immediately written to disk; on exception, only the currently executing rollout is lost, and missing parts are filled in on resume. Preserve actual prompts, token IDs, seeds, finish reasons, repeat ordinals, and grading evidence across serialization and resumption.
+After the task ends, cleanup is required to avoid leaving residual user services, etc.
+
+## Result Saving
+Record detailed (benchmark_name, model_name, n_samples, k_metrics, cot_mode, prompt_template), [optional: complete wkv_mode fp32io16 vs fp16 comparison] corresponding to (accuracy, truncation rate), where truncation rate is defined as the number of samples that reached the output limit without completing the answer / total samples.
+
+## Responsibility Boundaries
+This repository is independently responsible for the lm-eval native evaluation pipeline of in-scope registered benchmarks, the RWKV HTTP model adapter, standard results/details output, and Scoreboard score publishing. External systems are responsible for the inference service lifecycle, weight and wkv_mode switching, and endpoint pool manifests; LightEval and EvalScope are responsible for benchmarks they already cover. This repository does not carry cross-framework scheduling or external evaluation lifecycle.
+
+## Sync Upstream
+This repository needs to periodically sync with the upstream EleutherAI/lm-evaluation-harness repository. Verify the actual remote URL, branch, and latest commit used for comparison. First refactor the code according to the Correspondence Principle and Non-Interference Principle, remove single-use wrappers, clean up stale static tests, then sync upstream. Finally, the sync status should show "ahead x, behind 0".
+
+## Score Publication
+Wait for the scoreboard-rwkv repository and detailed publication instructions. Do not perform publication work yet. Publication-related requirements above apply once publication is enabled.
 
 ## Env
-使用 uv 管理本机和远端专属环境 ./.venv, 严禁本项目使用其它环境, 严禁其它项目使用本项目环境, 避免环境污染问题。
+Use uv to manage the local and remote dedicated environment ./.venv. This project is strictly prohibited from using other environments, and other projects are strictly prohibited from using this project's environment, to avoid environment pollution issues.
 
 ## Machine for Testing and Benchmarking
 ```bash
 ssh rwkv-sha-pro6000x8
 cd ~/Projects/MachineLearning/lm-evaluation-harness-rwkv
 ```
-use git to sync your changes instead of rsync.
+Use git to sync your changes instead of rsync.
+
+## Inference API
+Obtain current endpoints, weights, wkv mode, and pool capacity from the external inference project's endpoint manifest.
+
+Set request concurrency slightly above the sum of active pools' `max-num-seqs`; count DP replicas, with PP stages sharing capacity. Recalculate affected models when pools change, and balance traffic using actual load.
