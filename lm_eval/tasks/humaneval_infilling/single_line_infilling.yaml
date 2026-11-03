@@ -1,6 +1,8 @@
 include: multi_line_infilling.yaml
 task: humaneval_single_line_infilling
-dataset_name: HumanEval-SingleLineInfilling
+dataset_kwargs:
+  data_files:
+    test: hf://datasets/loubnabnl/humaneval_infilling@448c2c3593ea013776cc5f7f7c0b34342b7b524e/HumanEval-SingleLineInfilling/test/0000.parquet
 generation_kwargs:
   until:
     - "\n"

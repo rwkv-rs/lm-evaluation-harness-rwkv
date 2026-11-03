@@ -22,11 +22,7 @@ import datasets
 import requests
 from tqdm import tqdm
 
-from lm_eval.tasks.ruler.common_utils import (
-    DEFAULT_SEQ_LENGTHS,
-    get_tokenizer,
-    resolve_tokenizer_name,
-)
+from lm_eval.tasks.ruler.common_utils import DEFAULT_SEQ_LENGTHS, get_tokenizer
 
 CONFIG = {
     "tokens_to_generate": 32,
@@ -267,16 +263,17 @@ def get_dataset(tokenizer, docs, qas, max_seq_length=None, **kwargs) -> list[dic
 
 
 def get_qa_dataset(ds, **kwargs) -> dict[str, datasets.Dataset]:
+    seq_lengths = kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
     # Resolved before the documents are fetched, so a missing tokenizer is
     # reported immediately rather than after a large download.
-    tokenizer = get_tokenizer(resolve_tokenizer_name(kwargs))
+    tokenizer = get_tokenizer(**kwargs)
     if ds == "squad":
         qas, docs = read_squad()
     else:
         qas, docs = read_hotpotqa()
     df = (
         get_dataset(tokenizer=tokenizer, docs=docs, qas=qas, max_seq_length=seq)
-        for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+        for seq in seq_lengths
     )
 
     return {
