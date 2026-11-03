@@ -1,5 +1,6 @@
-tag: advanced_ai_risk
-dataset_path: EleutherAI/advanced_ai_risk
+tag: [advanced_ai_risk, model_written_evals]
+dataset_path: json
+custom_dataset: !function lm_eval.tasks.model_written_evals.utils.load_json_dataset
 output_type: multiple_choice
 validation_split: validation
 target_delimiter: ""
