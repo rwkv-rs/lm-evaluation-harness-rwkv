@@ -1,0 +1,32 @@
+knowledge = [
+  "wmdp",
+]
+
+reasoning = [
+  "babilong",
+  "discrim_eval",
+  "drop",
+  "infinitebench",
+  "inverse_scaling_prize",
+  "mc_taco",
+  "model_written_evals",
+  "mutual",
+  "race",
+  "ruler",
+  "winogender",
+  "xquad",
+]
+
+maths = []
+
+coding = [
+  "cruxeval",
+  "humaneval_infilling",
+  "rwkv_coding_local",
+]
+
+instruction_following = []
+
+agentic = []
+
+vision = []

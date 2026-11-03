@@ -4,6 +4,8 @@ tag:
 task: winogender_all
 dataset_path: oskarvanderwal/winogender
 dataset_name: all
+dataset_kwargs:
+  revision: d1cdb5b708800c151d09c5d8817290d3f6ced9f4
 test_split: test
 doc_to_text: "{{sentence}} ‘{{pronoun.capitalize()}}’ refers to the"
 doc_to_target: label

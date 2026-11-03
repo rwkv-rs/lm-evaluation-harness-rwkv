@@ -1,0 +1,37 @@
+group: mmlu_prox
+task:
+  - mmlu_prox_af
+  - mmlu_prox_ar
+  - mmlu_prox_bn
+  - mmlu_prox_cs
+  - mmlu_prox_de
+  - mmlu_prox_en
+  - mmlu_prox_es
+  - mmlu_prox_fr
+  - mmlu_prox_hi
+  - mmlu_prox_hu
+  - mmlu_prox_id
+  - mmlu_prox_it
+  - mmlu_prox_ja
+  - mmlu_prox_ko
+  - mmlu_prox_mr
+  - mmlu_prox_ne
+  - mmlu_prox_pt
+  - mmlu_prox_ru
+  - mmlu_prox_sr
+  - mmlu_prox_sw
+  - mmlu_prox_te
+  - mmlu_prox_th
+  - mmlu_prox_uk
+  - mmlu_prox_ur
+  - mmlu_prox_vi
+  - mmlu_prox_wo
+  - mmlu_prox_yo
+  - mmlu_prox_zh
+  - mmlu_prox_zu
+aggregate_metric_list:
+  - metric: exact_match
+    weight_by_size: true
+    filter_list: custom-extract
+metadata:
+  version: 0.0

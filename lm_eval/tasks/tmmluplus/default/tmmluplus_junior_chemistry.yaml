@@ -1,4 +1,9 @@
 "dataset_name": "junior_chemistry"
+dataset_path: csv
+dataset_kwargs:
+  data_files:
+    train: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/junior_chemistry_dev.csv
+    test: hf://datasets/ZoneTwelve/tmmluplus@0d61a3eb2087c21f4f63f199bca5f225ddaf03ac/data/junior_chemistry_test.csv
 "description": "以下為國中理化的單選題，請提供正確答案的選項。\n\n"
 "tag": "tmmluplus_STEM_tasks"
 "include": "_tmmluplus_template_yaml"

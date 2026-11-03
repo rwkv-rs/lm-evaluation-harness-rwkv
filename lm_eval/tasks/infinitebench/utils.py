@@ -356,6 +356,9 @@ def process_results_choice(doc: dict, results: list[str]) -> dict[str, float]:
     dataset stores answer text, not letters. Then matches using the official
     get_score_one_longbook_choice_eng() 6-step fallback.
     """
+    if len(results) == 4 and all(isinstance(result, tuple) and len(result) == 2 for result in results):
+        prediction = "ABCD"[max(range(4), key=lambda index: results[index][0])]
+        return {"score": float(prediction == _answer_to_letter(doc))}
     prediction = postprocess_prediction(results[0])
     label = _answer_to_letter(doc)
 
@@ -408,6 +411,9 @@ def process_results_code_debug(doc: dict, results: list[str]) -> dict[str, float
     The official get_answer() maps function name to letter via options index.
     Then matches using the official get_score_one_code_debug() logic.
     """
+    if len(results) == 4 and all(isinstance(result, tuple) and len(result) == 2 for result in results):
+        prediction = "ABCD"[max(range(4), key=lambda index: results[index][0])]
+        return {"score": float(prediction == _answer_to_letter(doc))}
     prediction = postprocess_prediction(results[0])
     answers = doc.get("answer", [])
 

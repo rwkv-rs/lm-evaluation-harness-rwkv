@@ -1,0 +1,32 @@
+# Paths are relative to this config. Supply a local JSONL problem suite.
+# HumanEval-shaped rows: task_id, prompt, entry_point, test, canonical_solution.
+# MBPP-shaped rows: task_id, text, entry_point, test_list, code.
+schema_version = 1
+backend = "rwkv7-remote"
+model_name = "rwkv7-g1k-1.5b-20260930-ctx32768"
+weight_revision = "rwkv7-g1k-1.5b-20260930-ctx32768"
+base_url = "http://127.0.0.1:8000/v1/completions"
+tokenizer_name = "rwkv-rs/rwkv7-g1-st"
+benchmarks = ["rwkv_coding_local"]
+output_dir = "../../results/rwkv7-g1k-1.5b-coding"
+max_length = 32768
+max_gen_toks = 16384
+max_num_seqs = 8
+apply_chat_template = true
+log_samples = true
+seed = [0, 1234, 1234, 1234]
+
+[rwkv_profile]
+prompt_template = "assistant"
+generation_prompt = "open_think"
+wkv_mode = "fp32io16"
+
+[coding]
+problems = "../../data/coding/problems.jsonl"
+num_samples = 8
+pass_k = [1, 4, 8]
+workers = 2
+test_timeout = 5.0
+memory_mb = 4096
+# Must already exist locally. The runner resolves and records its immutable ID.
+docker_image = "python:3.11-slim"

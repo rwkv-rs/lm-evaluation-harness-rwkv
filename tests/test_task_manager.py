@@ -9,6 +9,49 @@ from lm_eval.tasks._index import Entry, Kind, TaskIndex
 from lm_eval.tasks._yaml_loader import load_yaml
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_rwkv_no_think_choice_tasks_use_native_requests_without_affecting_other_modes(monkeypatch, native):
+    import datasets
+
+    row = {
+        "article": "A dialogue.", "options": ["cats", "dogs", "birds", "fish"], "answers": "B",
+        "sentence": "A sentence.", "question": "Question?", "answer": ["dogs"], "label": 1,
+        "filled_template": "Would you choose this applicant?", "decision_question_id": 0,
+        "race": "white", "gender": "male", "age": 30,
+        "context": "Source text or code.", "input": "Question?", "id": 0,
+    }
+    data = datasets.Dataset.from_list([row])
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: datasets.DatasetDict(
+        {split: data for split in ["train", "validation", "test", "code_debug", "longbook_choice_eng"]}
+    ))
+    names = ["mutual", "mc_taco", "discrim_eval_implicit", "discrim_eval_explicit",
+             "infinitebench_longbook_choice_en", "infinitebench_code_debug"]
+    manager = TaskManager(metadata={"rwkv_native_loglikelihood": native})
+    loaded = manager.load(names)
+    assert sorted(loaded["tasks"]) == sorted(names)
+    for name, task in loaded["tasks"].items():
+        assert task.OUTPUT_TYPE == ("multiple_choice" if native else "generate_until")
+        doc = task.eval_docs[0]
+        if native:
+            context = task.doc_to_text(doc)
+            requests = task.construct_requests(doc, context, metadata=(name, 0, 1))
+            assert len(requests) == len(task.doc_to_choice(doc))
+            assert all(request.request_type == "loglikelihood" for request in requests)
+            assert [request.args[1] for request in requests] == [
+                task.config.target_delimiter + choice for choice in task.doc_to_choice(doc)
+            ]
+            assert "<think" not in context
+            assert "inspect through code" not in context
+            scores = [(-2.0 if index != 1 else -0.5, False) for index in range(len(requests))]
+            metrics = task.process_results(doc, scores)
+            if name in {"mutual", "mc_taco"}:
+                assert metrics["acc"] == 1
+            elif name.startswith("infinitebench"):
+                assert metrics == {"score": 1.0}
+            else:
+                assert metrics["black_bias"][-1] == 1
+
+
 # =============================================================================
 # Existing fixtures and tests
 # =============================================================================
@@ -518,6 +561,29 @@ class TestTaskManagerIntegration:
         matches = shared_task_manager.match_tasks(["arc_*"])
         assert "arc_easy" in matches
         assert "arc_challenge" in matches
+
+    def test_rwkv_public_benchmark_names_resolve_natively(self, shared_task_manager):
+        """The public names used by RWKV evaluation presets resolve directly
+        as native task/group/tag names, with no adapter indirection."""
+        public_names = [
+            "race",
+            "drop",
+            "xquad",
+            "babilong",
+            "infinitebench",
+            "ruler",
+            "wmdp",
+            "cruxeval",
+            "inverse_scaling_prize",
+            "model_written_evals",
+            "humaneval_infilling",
+            "mutual",
+            "mc_taco",
+            "discrim_eval",
+            "winogender",
+        ]
+        for name in public_names:
+            assert name in shared_task_manager.all_tasks, name
 
     def test_name_is_registered(self, shared_task_manager):
         """_name_is_registered checks if name exists"""

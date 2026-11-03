@@ -66,6 +66,11 @@ class TaskFactory:
         """Build and return a Task."""
         cfg = self._load_full_config(entry, overrides)
 
+        # Task-owned RWKV NoCoT variants retain native request construction.
+        # Other models and thinking modes keep the task's default config.
+        if cfg.get("metadata", {}).get("rwkv_native_loglikelihood"):
+            cfg.update(deepcopy(cfg["metadata"].get("rwkv_no_think", {})))
+
         # Remove structural keys that aren't part of task config
         for key in ("tag", "group", "task_list"):
             cfg.pop(key, None)

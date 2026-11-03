@@ -1,6 +1,6 @@
 include: _infinitebench_common_yaml
 task: infinitebench_longbook_choice_en
-test_split: longbook_choice_en
+test_split: longbook_choice_eng
 process_results: !function utils.process_results_choice
 doc_to_text: !function utils.doc_to_text_longbook_choice
 generation_kwargs:
@@ -8,3 +8,10 @@ generation_kwargs:
   temperature: 0.0
   max_gen_toks: 40
   until: ["\n"]
+metadata:
+  rwkv_no_think:
+    output_type: multiple_choice
+    doc_to_choice: ["A", "B", "C", "D"]
+    doc_to_target: !function utils._answer_to_letter
+    generation_kwargs: null
+    filter_list: null

@@ -8,3 +8,11 @@ generation_kwargs:
   temperature: 0.0
   max_gen_toks: 5
   until: ["\n"]
+metadata:
+  rwkv_no_think:
+    output_type: multiple_choice
+    doc_to_text: "There is ONLY ONE function in the large project that is deliberately made to include an obvious error. Find the function that contains the error.\n\n{{context}}\n\nWhich funtion has deliberate error?\nA. {{options[0]}}\nB. {{options[1]}}\nC. {{options[2]}}\nD. {{options[3]}}"
+    doc_to_choice: ["A", "B", "C", "D"]
+    doc_to_target: !function utils._answer_to_letter
+    generation_kwargs: null
+    filter_list: null

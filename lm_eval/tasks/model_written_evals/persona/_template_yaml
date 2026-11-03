@@ -1,5 +1,6 @@
-tag: persona
-dataset_path: EleutherAI/persona
+tag: [persona, model_written_evals]
+dataset_path: json
+custom_dataset: !function lm_eval.tasks.model_written_evals.utils.load_json_dataset
 output_type: multiple_choice
 validation_split: validation
 target_delimiter: ""
