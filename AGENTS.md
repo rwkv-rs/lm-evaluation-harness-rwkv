@@ -130,3 +130,7 @@ Use git to sync your changes instead of rsync.
 Obtain current endpoints, weights, wkv mode, and pool capacity from the external inference project's endpoint manifest.
 
 Set request concurrency slightly above the sum of active pools' `max-num-seqs`; count DP replicas, with PP stages sharing capacity. Recalculate affected models when pools change, and balance traffic using actual load.
+
+## Pull request review
+
+Before reviewing or re-reviewing a pull request, read the [pull request review guide](docs/PR_REVIEW.md) and follow its rules.
