@@ -1,3 +1,7 @@
 include: mutual.yaml
 task: mutual_plus
-dataset_name: mutual_plus
+dataset_kwargs:
+  data_files:
+    train: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual_plus/train/0000.parquet
+    validation: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual_plus/validation/0000.parquet
+    test: hf://datasets/EleutherAI/mutual@7d17faac465aedb828171dc7580b5ad71c0d3666/mutual_plus/test/0000.parquet

@@ -12,6 +12,32 @@ from lm_eval.models.utils import handle_stop_sequences, postprocess_generated_te
 eval_logger = logging.getLogger(__name__)
 
 
+def _rwkv_sampling_config(profile: dict) -> dict:
+    """Map an RWKV `GenerationConfig` profile onto reportable sampling fields.
+
+    `_create_payload` strips several of these out of the outgoing HTTP request
+    (folding them into a server-side `generation_config` blob instead), so this
+    is the only place the *effective* sampling parameters survive for
+    `get_model_info()` to report into `results["config"]["sampling_config"]`.
+    """
+    sampling = {
+        key: profile[key]
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "frequency_penalty",
+            "penalty_decay",
+            "do_sample",
+        )
+        if profile.get(key) is not None
+    }
+    if profile.get("stop_strings"):
+        sampling["stop"] = list(profile["stop_strings"])
+    return sampling
+
+
 @register_model("local-completions")
 class LocalCompletionsAPI(TemplateAPI):
     def __init__(
@@ -131,13 +157,36 @@ class LocalCompletionsAPI(TemplateAPI):
         for out in outputs:
             tmp = [None] * len(out["choices"])
             for choices in out["choices"]:
-                tmp[choices["index"]] = choices["text"]
+                tmp[choices["index"]] = _RWKVCompletion(
+                    choices["text"], choices.get("finish_reason"), raw_response=out
+                )
             res = res + tmp
         return res
 
     @property
     def api_key(self):
         return os.environ.get("OPENAI_API_KEY", "")
+
+
+class _RWKVCompletion(str):
+    """Completion text retaining the transport details supplied by the server."""
+
+    def __new__(
+        cls,
+        text: str,
+        finish_reason: str | None = None,
+        *,
+        raw_response: dict | None = None,
+    ):
+        value = super().__new__(cls, text)
+        value.finish_reason = finish_reason
+        value.raw_response = raw_response
+        value.prompt = None
+        value.prompt_token_ids = None
+        value.output_token_ids = None
+        value.reasoning = None
+        value.truncated = finish_reason in {"length", "max_tokens"}
+        return value
 
 
 @register_model("local-chat-completions")

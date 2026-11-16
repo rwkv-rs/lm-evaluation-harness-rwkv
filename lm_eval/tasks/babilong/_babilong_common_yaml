@@ -11,7 +11,8 @@ metric_list:
 generation_kwargs:
   do_sample: false
   temperature: 0.0
-  max_gen_toks: 16
-  until: []
+  max_gen_toks: 64
+  until:
+    - "\n"
 metadata:
   version: 0.0
