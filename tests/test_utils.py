@@ -711,3 +711,85 @@ class TestSimpleParseArgsString:
         result = simple_parse_args_string("trust_remote_code=true,temperature=0.7")
         assert result["trust_remote_code"] is True
         assert result["temperature"] == 0.7
+
+
+def test_ruler_remote_tokenizer_uses_native_http_route(monkeypatch):
+    from lm_eval.tasks.ruler import common_utils
+
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tokens": [0, 11, 12]}
+
+    def post(self, url, json, timeout):
+        calls.append((url, json, timeout))
+        return Response()
+
+    common_utils.get_tokenizer.cache_clear()
+    monkeypatch.setattr("requests.Session.post", post)
+    tokenizer = common_utils.get_tokenizer(
+        tokenizer_base_url="http://127.0.0.1:8000/v1/completions",
+        tokenizer_model="rwkv7-g1i-1.5b-20260805-ctx16384",
+    )
+
+    assert tokenizer("hello").input_ids == [11, 12]
+    assert calls == [
+        (
+            "http://127.0.0.1:8000/tokenize",
+            {
+                "model": "rwkv7-g1i-1.5b-20260805-ctx16384",
+                "prompt": "hello",
+                "add_special_tokens": False,
+            },
+            30,
+        )
+    ]
+    common_utils.get_tokenizer.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("module_name", "entrypoint", "dataset_reader"),
+    [
+        ("cwe_utils", "get_cw_dataset", None),
+        ("fwe_utils", "fwe_download", None),
+        ("vt_utils", "get_vt_dataset", None),
+        ("qa_utils", "get_squad", "read_squad"),
+    ],
+)
+def test_ruler_dataset_entrypoints_forward_remote_tokenizer_metadata(
+    monkeypatch, module_name, entrypoint, dataset_reader
+):
+    module = pytest.importorskip(f"lm_eval.tasks.ruler.{module_name}")
+    remote_tokenizer = object()
+    tokenizer_kwargs = []
+
+    def fake_get_tokenizer(**kwargs):
+        tokenizer_kwargs.append(kwargs)
+        return remote_tokenizer
+
+    def fake_get_dataset(tokenizer, **kwargs):
+        assert tokenizer is remote_tokenizer
+        return [{"input": "test", "outputs": ["answer"]}]
+
+    monkeypatch.setattr(module, "get_tokenizer", fake_get_tokenizer)
+    monkeypatch.setattr(module, "get_dataset", fake_get_dataset)
+    if dataset_reader:
+        monkeypatch.setattr(module, dataset_reader, lambda: ([], []))
+
+    result = getattr(module, entrypoint)(
+        max_seq_lengths=[4096],
+        tokenizer_base_url="http://127.0.0.1:8000/v1/completions",
+        tokenizer_model="rwkv7-g1i-1.5b-20260805-ctx16384",
+    )
+
+    assert len(result["test"]) == 1
+    assert tokenizer_kwargs == [
+        {
+            "tokenizer_base_url": "http://127.0.0.1:8000/v1/completions",
+            "tokenizer_model": "rwkv7-g1i-1.5b-20260805-ctx16384",
+        }
+    ]
