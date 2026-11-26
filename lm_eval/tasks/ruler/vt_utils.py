@@ -28,7 +28,7 @@ from tqdm import tqdm
 from lm_eval.tasks.ruler.common_utils import (
     DEFAULT_SEQ_LENGTHS,
     get_tokenizer,
-    resolve_tokenizer_name,
+    resolve_tokenizer_kwargs,
 )
 
 
@@ -249,10 +249,10 @@ def get_dataset(
 
 
 def get_vt_dataset(**kwargs) -> dict[str, datasets.Dataset]:
-    tokenizer = get_tokenizer(resolve_tokenizer_name(kwargs))
+    seq_lengths = kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+    tokenizer = get_tokenizer(**resolve_tokenizer_kwargs(kwargs))
     df = (
-        get_dataset(tokenizer=tokenizer, seq=seq)
-        for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+        get_dataset(tokenizer=tokenizer, seq=seq) for seq in seq_lengths
     )
 
     return {

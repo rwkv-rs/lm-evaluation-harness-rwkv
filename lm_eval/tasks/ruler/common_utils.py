@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import re
 from functools import cache
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Union
 
+import requests
 from transformers import AutoTokenizer
 
 
@@ -21,7 +23,14 @@ DEFAULT_SEQ_LENGTHS = [
 # The keys a model name can arrive under. RULER tasks are handed the parsed
 # `--model_args`, and each backend names the model differently: `pretrained`
 # for local HuggingFace models, `model` for the API backends.
-TOKENIZER_ARG_KEYS = ("tokenizer", "pretrained", "model")
+TOKENIZER_ARG_KEYS = (
+    "tokenizer",
+    "pretrained",
+    "tokenizer_base_url",
+    "tokenizer_model",
+    "model",
+)
+TOKENIZER_NAME_KEYS = ("tokenizer", "pretrained", "model")
 
 
 def resolve_tokenizer_name(kwargs: dict) -> str | None:
@@ -34,18 +43,79 @@ def resolve_tokenizer_name(kwargs: dict) -> str | None:
     raises `TypeError: unhashable type: 'dict'` and the assertion below never
     gets the chance to say what is actually wrong.
     """
-    for key in TOKENIZER_ARG_KEYS:
+    for key in TOKENIZER_NAME_KEYS:
         value = kwargs.get(key)
         if isinstance(value, str) and value:
             return value
     return None
 
 
+def resolve_tokenizer_kwargs(kwargs: dict) -> dict:
+    """Pull ``get_tokenizer``'s own arguments out of a synthetic task's kwargs.
+
+    Synthetic RULER tasks receive the parsed model metadata as arbitrary
+    keyword arguments. ``get_tokenizer`` is decorated with ``functools.cache``,
+    which hashes every argument before the body runs, so passing an unhashable
+    value such as ``generation_parameters={...}`` raises ``TypeError`` before
+    tokenizer resolution can run. Keep only the known string-valued tokenizer
+    keys at the cached boundary.
+    """
+    return {
+        key: kwargs[key]
+        for key in TOKENIZER_ARG_KEYS
+        if isinstance(kwargs.get(key), str) and kwargs[key]
+    }
+
+
+class RemoteRulerTokenizer:
+    def __init__(self, base_url: str, model: str, timeout: float = 30):
+        self.base_url = base_url.removesuffix("/v1/completions").rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.session = requests.Session()
+
+    def encode(self, text: str) -> list[int]:
+        response = self.session.post(
+            f"{self.base_url}/tokenize",
+            json={
+                "model": self.model,
+                "prompt": text,
+                "add_special_tokens": False,
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        tokens = response.json().get("tokens")
+        if not isinstance(tokens, list) or not all(
+            isinstance(token, int) for token in tokens
+        ):
+            raise RuntimeError("Malformed response from remote /tokenize endpoint.")
+        return tokens[1:] if tokens and tokens[0] == 0 else tokens
+
+    def __call__(self, text: str, **kwargs):
+        return SimpleNamespace(input_ids=self.encode(text))
+
+
 @cache
 def get_tokenizer(
-    tokenizer=None, pretrained=None, **kwargs
-) -> transformers.PreTrainedTokenizer | transformers.PreTrainedTokenizerFast:
-    pretrained = tokenizer or pretrained
+    tokenizer=None,
+    pretrained=None,
+    tokenizer_base_url=None,
+    tokenizer_model=None,
+    model=None,
+) -> Union[
+    RemoteRulerTokenizer,
+    "transformers.PreTrainedTokenizer",
+    "transformers.PreTrainedTokenizerFast",
+]:
+    if tokenizer_base_url:
+        remote_model = tokenizer_model or model
+        assert remote_model, "No model provided for the remote tokenizer."
+        eval_logger.info(
+            "Using remote tokenizer %s for synthetic tasks.", tokenizer_base_url
+        )
+        return RemoteRulerTokenizer(tokenizer_base_url, remote_model)
+    pretrained = tokenizer or pretrained or model
     assert pretrained, (
         "No tokenizer or pretrained provided. RULER tasks generate their own "
         "data and need a tokenizer to size it to each target length; pass one "

@@ -26,7 +26,7 @@ from tqdm import tqdm
 from lm_eval.tasks.ruler.common_utils import (
     DEFAULT_SEQ_LENGTHS,
     get_tokenizer,
-    resolve_tokenizer_name,
+    resolve_tokenizer_kwargs,
 )
 
 
@@ -163,10 +163,10 @@ def get_dataset(tokenizer, max_seq_length=None, **kwargs):
 
 
 def fwe_download(**kwargs):
-    tokenizer = get_tokenizer(resolve_tokenizer_name(kwargs))
+    seq_lengths = kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+    tokenizer = get_tokenizer(**resolve_tokenizer_kwargs(kwargs))
     df = (
-        get_dataset(tokenizer, max_seq_length=seq)
-        for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+        get_dataset(tokenizer, max_seq_length=seq) for seq in seq_lengths
     )
 
     return {

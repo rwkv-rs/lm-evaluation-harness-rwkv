@@ -1,6 +1,9 @@
 task: humaneval_multi_line_infilling
-dataset_path: loubnabnl/humaneval_infilling
-dataset_name: HumanEval-MultiLineInfilling
+dataset_path: parquet
+dataset_name: null
+dataset_kwargs:
+  data_files:
+    test: hf://datasets/loubnabnl/humaneval_infilling@448c2c3593ea013776cc5f7f7c0b34342b7b524e/HumanEval-MultiLineInfilling/test/0000.parquet
 unsafe_code: true
 output_type: generate_until
 test_split: test
