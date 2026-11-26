@@ -1,21 +1,21 @@
 import evaluate as hf_evaluate
 
 
-try:
-    compute_ = hf_evaluate.load("code_eval")
-    test_cases = ["assert add(2, 3)==5"]
-    candidates = [["def add(a,b): return a*b"]]
-    results = compute_.compute(references=test_cases, predictions=candidates, k=[1])
-except Exception as e:
-    raise e
+compute_ = None
+
+
+def _get_code_eval_metric():
+    global compute_
+    if compute_ is None:
+        compute_ = hf_evaluate.load("code_eval")
+    return compute_
 
 
 def pass_at_k(references: list[str], predictions: list[list[str]], k: list[int] = None):
-    global compute_
     assert k is not None
     if isinstance(k, int):
         k = [k]
-    res = compute_.compute(
+    res = _get_code_eval_metric().compute(
         references=references,
         predictions=predictions,
         k=k,

@@ -18,11 +18,7 @@ import datasets
 import wonderwords
 from tqdm import tqdm
 
-from lm_eval.tasks.ruler.common_utils import (
-    DEFAULT_SEQ_LENGTHS,
-    get_tokenizer,
-    resolve_tokenizer_name,
-)
+from lm_eval.tasks.ruler.common_utils import DEFAULT_SEQ_LENGTHS, get_tokenizer
 
 
 CONFIG = {
@@ -176,10 +172,10 @@ def get_dataset(tokenizer, seq: int | None = None, **kwargs):
 
 
 def get_cw_dataset(**kwargs):
-    tokenizer = get_tokenizer(resolve_tokenizer_name(kwargs))
+    seq_lengths = kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+    tokenizer = get_tokenizer(**kwargs)
     df = (
-        get_dataset(tokenizer, seq=seq)
-        for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
+        get_dataset(tokenizer, seq=seq) for seq in seq_lengths
     )
 
     return {

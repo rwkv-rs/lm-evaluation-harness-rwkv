@@ -1,5 +1,6 @@
 tag:
   - social_bias
+  - discrim_eval
 task: discrim_eval_explicit
 dataset_path: Anthropic/discrim-eval
 dataset_name: explicit

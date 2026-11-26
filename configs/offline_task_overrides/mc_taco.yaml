@@ -1,0 +1,19 @@
+task: mc_taco
+dataset_path: parquet
+dataset_kwargs:
+  data_files:
+    validation: /home/creator/.cache/huggingface/hub/datasets--CogComp--mc_taco/snapshots/991693763bea0a5906d534ea8855be19cf338deb/plain_text/validation/0000.parquet
+    test: /home/creator/.cache/huggingface/hub/datasets--CogComp--mc_taco/snapshots/991693763bea0a5906d534ea8855be19cf338deb/plain_text/test/0000.parquet
+output_type: multiple_choice
+validation_split: validation
+test_split: test
+doc_to_text: "{{sentence}}\nQuestion: {{question}}\nAnswer: {{answer}}\nPlausible:"
+doc_to_target: label
+doc_to_choice: ["no", "yes"]
+should_decontaminate: true
+doc_to_decontamination_query: "{{question}} {{sentence}}"
+metric_list:
+  - metric: acc
+  - metric: f1
+metadata:
+  version: 1.0
